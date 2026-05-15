@@ -11,10 +11,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::discord::{
     ActivityInfo, ActivityKind, ChannelUnreadState, MessageState, PresenceStatus,
 };
-use crate::tui::keybinding::Action;
 
 use super::super::{
-    format::{truncate_display_width, truncate_display_width_from},
+    format::{sanitize_for_display_width, truncate_display_width, truncate_display_width_from},
     message_format::{EMOJI_REACTION_IMAGE_WIDTH, format_attachment_summary, wrap_text_lines},
     state::{
         ChannelPaneEntry, DashboardState, EmojiPickerEntry, FocusPane, GuildPaneEntry,
@@ -447,7 +446,7 @@ pub(super) fn render_composer(
             })
             .block(
                 Block::default()
-                    .title(" Message Input ")
+                    .title(state.composer_title())
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(border_color))
@@ -1089,7 +1088,7 @@ pub(super) fn composer_text(state: &DashboardState, width: u16) -> String {
             "group-dm" | "Group" => channel.name.clone(),
             _ => format!("#{}", channel.name),
         };
-        // Tell the user up-front if the keymap won't open the composer here,
+        // Tell the user up-front if the shortcut won't open the composer here,
         // so they don't repeatedly press `i` and wonder why nothing happens.
         if !state.can_send_in_selected_channel() {
             return format!("read-only · cannot send messages in {label}");
@@ -1097,11 +1096,9 @@ pub(super) fn composer_text(state: &DashboardState, width: u16) -> String {
         // SEND is allowed but ATTACH is not. Tell the user uploads will be
         // refused before they try.
         if !state.can_attach_in_selected_channel() {
-            let key = state.key_bindings().label(Action::OpenComposer);
-            return format!("press {key} to write in {label} (attachments disabled)");
+            return format!("press i to write in {label} (attachments disabled)");
         }
-        let key = state.key_bindings().label(Action::OpenComposer);
-        return format!("press {key} to write in {label}");
+        return format!("press i to write in {label}");
     }
 
     "select a channel to write a message".to_owned()
@@ -1176,8 +1173,13 @@ pub(super) fn render_members(
             let name_style =
                 member_name_style(member, state.member_role_color(member), is_selected);
 
-            let display =
-                member_display_label(member, state.member_horizontal_scroll(), max_name_width);
+            let display_name = state.member_display_name(member);
+            let display = member_display_label(
+                member,
+                &display_name,
+                state.member_horizontal_scroll(),
+                max_name_width,
+            );
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" {} ", presence_marker(member.status())),
@@ -1280,7 +1282,7 @@ pub(super) fn render_members(
 fn member_group_header(group: &MemberGroup<'_>, content_width: usize) -> Line<'static> {
     let count_suffix = format!(" - {}", group.entries.len());
     let label_max = content_width.saturating_sub(count_suffix.width());
-    let label = truncate_display_width(&group.label, label_max);
+    let label = truncate_display_width(&sanitize_for_display_width(&group.label), label_max);
     Line::from(vec![
         Span::styled(
             label,
@@ -1317,10 +1319,11 @@ pub(super) fn member_name_style(
 
 pub(super) fn member_display_label(
     member: MemberEntry<'_>,
+    display_name: &str,
     horizontal_scroll: usize,
     max_width: usize,
 ) -> String {
-    let display_name = member.display_name();
+    let display_name = sanitize_for_display_width(display_name);
     if !member.is_bot() {
         return truncate_display_width_from(&display_name, horizontal_scroll, max_width);
     }
@@ -1405,16 +1408,6 @@ pub(super) fn render_header(frame: &mut Frame, area: Rect, state: &DashboardStat
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Left),
-        area,
-    );
-
-    // Right-aligned hint so users discover the keybind help popup.
-    let keymap_key = state.key_bindings().label(Action::OpenKeymap);
-    let hint = format!("Press {keymap_key} to see keybinds");
-    frame.render_widget(
-        Paragraph::new(hint)
-            .alignment(Alignment::Right)
-            .style(Style::default()),
         area,
     );
 }

@@ -20,7 +20,6 @@ use super::format::{
     MentionTarget, RenderedText, TextHighlightKind, render_user_mentions,
     render_user_mentions_with_highlights, replace_custom_emoji_markup,
 };
-use super::keybinding::ActiveKeyBindings;
 mod channel_switcher;
 mod channels;
 mod composer;
@@ -43,6 +42,7 @@ mod presentation;
 mod reactions;
 mod scroll;
 mod subscriptions;
+mod toast;
 mod user;
 
 use channel_switcher::ChannelSwitcherState;
@@ -79,6 +79,18 @@ pub use popups::{
 pub use presentation::{discord_color, folder_color, presence_color, presence_marker};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToastKind {
+    Success,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ToastView<'a> {
+    pub text: &'a str,
+    pub kind: ToastKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OlderHistoryRequestState {
     Requested { before: Id<MessageMarker> },
     Exhausted { before: Id<MessageMarker> },
@@ -96,6 +108,13 @@ const READ_ACK_DEBOUNCE: Duration = Duration::from_millis(1000);
 struct PendingReadAck {
     message_id: Id<MessageMarker>,
     deadline: Instant,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToastMessage {
+    text: String,
+    kind: ToastKind,
+    expires_at: Instant,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -226,6 +245,8 @@ pub struct DashboardState {
     /// Discord's `<:name:id>` or `<a:name:id>` wire format.
     composer_emoji_completions: Vec<EmojiCompletion>,
     message_action_menu: Option<MessageActionMenuState>,
+    message_delete_confirmation: Option<popups::MessageDeleteConfirmationState>,
+    message_pin_confirmation: Option<popups::MessagePinConfirmationState>,
     options_popup: Option<popups::OptionsPopupState>,
     image_viewer: Option<ImageViewerState>,
     guild_leader_action: Option<GuildLeaderActionState>,
@@ -236,9 +257,9 @@ pub struct DashboardState {
     poll_vote_picker: Option<PollVotePickerState>,
     reaction_users_popup: Option<ReactionUsersPopupState>,
     debug_log_popup_open: bool,
-    keymap_popup_open: bool,
+    toast_message: Option<ToastMessage>,
     open_composer_in_editor_requested: bool,
-    key_bindings: ActiveKeyBindings,
+    copy_message_content_requested: Option<String>,
     leader_mode: Option<LeaderMode>,
     channel_switcher: Option<ChannelSwitcherState>,
     guild_pane_filter: Option<PaneFilterState>,
@@ -359,6 +380,8 @@ impl DashboardState {
             composer_mention_completions: Vec::new(),
             composer_emoji_completions: Vec::new(),
             message_action_menu: None,
+            message_delete_confirmation: None,
+            message_pin_confirmation: None,
             options_popup: None,
             image_viewer: None,
             guild_leader_action: None,
@@ -369,9 +392,9 @@ impl DashboardState {
             poll_vote_picker: None,
             reaction_users_popup: None,
             debug_log_popup_open: false,
-            keymap_popup_open: false,
+            toast_message: None,
             open_composer_in_editor_requested: false,
-            key_bindings: ActiveKeyBindings::default(),
+            copy_message_content_requested: None,
             leader_mode: None,
             channel_switcher: None,
             guild_pane_filter: None,

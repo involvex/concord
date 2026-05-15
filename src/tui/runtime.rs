@@ -1,10 +1,13 @@
-use std::collections::{HashSet, VecDeque};
+use std::{
+    collections::{HashSet, VecDeque},
+    io::stdout,
+};
 
 use crate::discord::ids::{
     Id,
     marker::{ChannelMarker, GuildMarker, UserMarker},
 };
-use crossterm::event::EventStream;
+use crossterm::{clipboard::CopyToClipboard, event::EventStream};
 use futures::StreamExt;
 use ratatui::layout::Rect;
 use tokio::sync::{mpsc, watch};
@@ -16,7 +19,7 @@ use crate::{
 };
 
 use super::{
-    commands as command_helpers, effects as effect_helpers, events, input, keybinding,
+    commands as command_helpers, effects as effect_helpers, events, input,
     media::{
         AvatarImageCache, EmojiImageCache, ImagePreviewCache, visible_avatar_targets,
         visible_emoji_image_targets, visible_image_preview_targets,
@@ -48,14 +51,6 @@ pub(super) async fn run_dashboard(
         }
     };
     let mut state = DashboardState::new_with_display_options(display_options);
-    let key_bindings = match config::load_key_bindings_config() {
-        Ok(cfg) => keybinding::ActiveKeyBindings::from_config(&cfg),
-        Err(error) => {
-            logging::error("config", format!("failed to load keybindings: {error}"));
-            keybinding::ActiveKeyBindings::default()
-        }
-    };
-    state.set_key_bindings(key_bindings);
     drop(snapshots.borrow_and_update());
     let initial_snapshot = client.current_discord_snapshot();
     let mut current_snapshot_revision = initial_snapshot.revision;
@@ -72,7 +67,8 @@ pub(super) async fn run_dashboard(
     let mut member_requests = MemberRequests::default();
     let mut thread_preview_requests = ThreadPreviewRequests::default();
     let mut last_member_subscription: Option<(Id<GuildMarker>, Id<ChannelMarker>, u32)> = None;
-    let mut requested_author_profiles: HashSet<(Id<UserMarker>, Id<GuildMarker>)> = HashSet::new();
+    let mut requested_author_profiles: HashSet<(Id<UserMarker>, Option<Id<GuildMarker>>)> =
+        HashSet::new();
     let mut image_targets = Vec::new();
     let mut avatar_targets = Vec::new();
     let mut emoji_targets = Vec::new();
@@ -245,6 +241,7 @@ pub(super) async fn run_dashboard(
         }
 
         let pending_read_ack_deadline = state.next_read_ack_deadline();
+        let pending_toast_deadline = state.next_toast_deadline();
 
         tokio::select! {
             maybe_event = terminal_events.next() => {
@@ -261,6 +258,17 @@ pub(super) async fn run_dashboard(
                             if let Err(error) = open_composer_in_editor(terminal, &mut state) {
                                 logging::error("tui", format!("editor failed: {error}"));
                             }
+                        }
+                        if let Some(content) = state.take_copy_message_content_request() {
+                            let now = std::time::Instant::now();
+                            match copy_to_clipboard(&content) {
+                                Ok(()) => state.show_success_toast("Message copied", now),
+                                Err(error) => {
+                                    logging::error("tui", format!("copy message failed: {error}"));
+                                    state.show_error_toast("Failed to copy message", now);
+                                }
+                            }
+                            dirty = true;
                         }
                         if let Some(command) = outcome.command
                             && commands.send(command).await.is_err()
@@ -440,6 +448,19 @@ pub(super) async fn run_dashboard(
                 state.flush_due_read_acks(std::time::Instant::now());
                 dirty = true;
             }
+            _ = async {
+                match pending_toast_deadline {
+                    Some(deadline) => tokio::time::sleep_until(
+                        tokio::time::Instant::from_std(deadline),
+                    )
+                    .await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if state.clear_expired_toast(std::time::Instant::now()) {
+                    dirty = true;
+                }
+            }
         }
 
         if let Some(channel_id) = history_requests.next(state.selected_message_history_channel_id())
@@ -522,15 +543,16 @@ pub(super) async fn run_dashboard(
             }
         }
 
-        for (user_id, guild_id) in state.missing_message_author_profile_requests() {
+        let profile_requests = state
+            .missing_message_author_profile_requests()
+            .into_iter()
+            .chain(state.missing_visible_member_profile_requests());
+        for (user_id, guild_id) in profile_requests {
             if !requested_author_profiles.insert((user_id, guild_id)) {
                 continue;
             }
             if commands
-                .send(AppCommand::LoadUserProfile {
-                    user_id,
-                    guild_id: Some(guild_id),
-                })
+                .send(AppCommand::LoadUserProfile { user_id, guild_id })
                 .await
                 .is_err()
             {
@@ -588,6 +610,10 @@ pub(super) async fn run_dashboard(
     }
 
     Ok(())
+}
+
+fn copy_to_clipboard(content: &str) -> std::io::Result<()> {
+    crossterm::execute!(stdout(), CopyToClipboard::to_clipboard_from(content))
 }
 
 fn open_composer_in_editor(
