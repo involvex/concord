@@ -12,7 +12,8 @@
     "dev": "cargo run",
     "format": "cargo fmt",
     "lint": "cargo clippy -- -D warnings && cargo check",
-    "prepublishOnly": "bun run lint && bun run format &&  cargo build --release"
+    "prepublishOnly": "bun run lint && bun run format && cargo build --release",
+    "prebuild": "bun run lint && bun run format"
   },
   "repository": {
     "type": "git",
