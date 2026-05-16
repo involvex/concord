@@ -209,16 +209,16 @@ shortcuts:
 
 Message shortcuts:
 
-| Shortcut | Action       | Description                                               |
-| -------- | ------------ | --------------------------------------------------------- |
-| `y`      | Copy         | Copy the selected message text and show a short toast      |
-| `r`      | React        | Open the reaction picker for the selected message          |
-| `R`      | Reply        | Start a reply to the selected message                     |
-| `d`      | Delete       | Open a delete confirmation before deleting the message     |
-| `e`      | Edit         | Start editing the selected message when editing is allowed |
-| `v`      | View image   | Open the selected message's image viewer                   |
-| `p`      | Profile      | Open the selected message author's profile                 |
-| `P`      | Pin / unpin  | Open a pin or unpin confirmation for the selected message  |
+| Shortcut | Action      | Description                                                |
+| -------- | ----------- | ---------------------------------------------------------- |
+| `y`      | Copy        | Copy the selected message text and show a short toast      |
+| `r`      | React       | Open the reaction picker for the selected message          |
+| `R`      | Reply       | Start a reply to the selected message                      |
+| `d`      | Delete      | Open a delete confirmation before deleting the message     |
+| `e`      | Edit        | Start editing the selected message when editing is allowed |
+| `v`      | View image  | Open the selected message's image viewer                   |
+| `p`      | Profile     | Open the selected message author's profile                 |
+| `P`      | Pin / unpin | Open a pin or unpin confirmation for the selected message  |
 
 Server actions:
 

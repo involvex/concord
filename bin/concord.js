@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
-const { spawn } = require('child_process');
-const { existsSync } = require('fs');
-const { join } = require('path');
+const { spawn } = require("child_process");
+const { existsSync } = require("fs");
+const { join } = require("path");
 
 const projectRoot = __dirname;
-const binaryName = process.platform === 'win32' ? 'concord.exe' : 'concord';
-const releaseBinary = join(projectRoot, '..', 'target', 'release', binaryName);
-const debugBinary = join(projectRoot, '..', 'target', 'debug', binaryName);
+const binaryName = process.platform === "win32" ? "concord.exe" : "concord";
+const releaseBinary = join(projectRoot, "..", "target", "release", binaryName);
+const debugBinary = join(projectRoot, "..", "target", "debug", binaryName);
 
 function getBinaryPath() {
   if (existsSync(releaseBinary)) {
@@ -23,16 +23,16 @@ function main() {
   let binaryPath = getBinaryPath();
 
   if (!binaryPath) {
-    console.error('Concord binary not found. Building release version...');
-    const buildProcess = spawn('cargo', ['build', '--release'], {
-      cwd: join(projectRoot, '..'),
-      stdio: 'inherit',
-      shell: true
+    console.error("Concord binary not found. Building release version...");
+    const buildProcess = spawn("cargo", ["build", "--release"], {
+      cwd: join(projectRoot, ".."),
+      stdio: "inherit",
+      shell: true,
     });
 
-    buildProcess.on('close', (code) => {
+    buildProcess.on("close", (code) => {
       if (code !== 0) {
-        console.error('Failed to build concord');
+        console.error("Failed to build concord");
         process.exit(1);
       }
       binaryPath = releaseBinary;
@@ -46,11 +46,11 @@ function main() {
 
 function runBinary(path) {
   const child = spawn(path, process.argv.slice(2), {
-    stdio: 'inherit',
-    shell: process.platform === 'win32'
+    stdio: "inherit",
+    shell: process.platform === "win32",
   });
 
-  child.on('close', (code) => process.exit(code));
+  child.on("close", (code) => process.exit(code));
 }
 
 main();
