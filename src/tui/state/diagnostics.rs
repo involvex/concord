@@ -3,6 +3,11 @@ use crate::discord::ChannelVisibilityStats;
 use super::{ActiveGuildScope, DashboardState};
 use crate::logging;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct HelpPopupState {
+    pub(super) scroll: usize,
+}
+
 impl DashboardState {
     pub fn update_available_version(&self) -> Option<&str> {
         self.update_available_version.as_deref()
@@ -21,15 +26,34 @@ impl DashboardState {
     }
 
     pub fn is_help_popup_open(&self) -> bool {
-        self.help_popup_open
+        self.help_popup.is_some()
     }
 
     pub fn open_help_popup(&mut self) {
-        self.help_popup_open = true;
+        self.help_popup = Some(HelpPopupState { scroll: 0 });
     }
 
     pub fn close_help_popup(&mut self) {
-        self.help_popup_open = false;
+        self.help_popup = None;
+    }
+
+    pub fn help_popup_scroll(&self) -> usize {
+        self.help_popup
+            .as_ref()
+            .map(|s| s.scroll)
+            .unwrap_or_default()
+    }
+
+    pub fn help_popup_increment_scroll(&mut self, delta: usize) {
+        if let Some(s) = self.help_popup.as_mut() {
+            s.scroll = s.scroll.saturating_add(delta);
+        }
+    }
+
+    pub fn help_popup_decrement_scroll(&mut self, delta: usize) {
+        if let Some(s) = self.help_popup.as_mut() {
+            s.scroll = s.scroll.saturating_sub(delta);
+        }
     }
 
     pub fn request_open_composer_in_editor(&mut self) {

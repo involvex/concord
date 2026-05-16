@@ -223,6 +223,10 @@ pub fn handle_key(state: &mut DashboardState, key: KeyEvent) -> Option<AppComman
         return handle_debug_log_popup_key(state, key);
     }
 
+    if state.is_help_popup_open() {
+        return handle_help_popup_key(state, key);
+    }
+
     if state.is_options_popup_open() {
         return handle_options_popup_key(state, key);
     }
@@ -924,6 +928,35 @@ fn handle_reaction_users_popup_key(
     }
 
     None
+}
+
+fn handle_help_popup_key(state: &mut DashboardState, key: KeyEvent) -> Option<AppCommand> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            state.close_help_popup();
+            None
+        }
+        KeyCode::Char('j')
+        | KeyCode::Down
+        | KeyCode::Char('k')
+        | KeyCode::Up
+        | KeyCode::PageDown
+        | KeyCode::PageUp => {
+            let delta = match key.code {
+                KeyCode::PageDown => 6,
+                KeyCode::PageUp => 6,
+                _ => 1,
+            };
+            match key.code {
+                KeyCode::Char('k') | KeyCode::Up | KeyCode::PageUp => {
+                    state.help_popup_decrement_scroll(delta)
+                }
+                _ => state.help_popup_increment_scroll(delta),
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 fn handle_debug_log_popup_key(state: &mut DashboardState, key: KeyEvent) -> Option<AppCommand> {
