@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
@@ -10,9 +11,10 @@ use crate::discord::ids::{
 
 use crate::config::DisplayOptions;
 use crate::discord::{
-    AppCommand, AppEvent, ChannelUnreadState, DiscordState, DownloadAttachmentSource,
-    ForumPostArchiveState, MentionInfo, MessageAttachmentUpload, MessageInfo, MessageSnapshotInfo,
-    MessageState, MuteDuration, PresenceStatus,
+    AppCommand, AppEvent, ChannelUnreadState, DiscordSnapshot, DiscordState,
+    DownloadAttachmentSource, ForumPostArchiveState, MentionInfo, MessageAttachmentUpload,
+    MessageInfo, MessageSnapshotInfo, MessageState, MuteDuration, PresenceStatus, SnapshotAreas,
+    SnapshotRevision,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -68,7 +70,8 @@ pub use model::{
     FORUM_POST_CARD_HEIGHT, FocusPane, GuildActionItem, GuildPaneEntry, ImageViewerItem,
     MemberActionItem, MessageActionItem, MessageActionKind, MuteActionDurationItem,
     PollVotePickerItem, ThreadMessagePreview, ThreadSummary, channel_action_shortcut,
-    guild_action_shortcut, indexed_shortcut, member_action_shortcut, message_action_shortcut,
+    emoji_reaction_shortcut, guild_action_shortcut, indexed_shortcut, member_action_shortcut,
+    message_action_shortcut,
 };
 #[allow(unused_imports)]
 pub use model::{ChannelActionKind, ChannelBranch, GuildActionKind, GuildBranch, MemberActionKind};
@@ -168,6 +171,22 @@ struct ForumPostListState {
     active_post_ids: Vec<Id<ChannelMarker>>,
     archived_post_ids: Vec<Id<ChannelMarker>>,
     has_more: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct MessageRowContentMetricsCacheKey {
+    message_id: u64,
+    content_width: usize,
+    preview_width: u16,
+    max_preview_height: u16,
+    show_custom_emoji: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MessageRowContentMetrics {
+    content_rows: usize,
+    reaction_rows: usize,
+    preview_rows: usize,
 }
 
 #[derive(Debug)]
@@ -282,6 +301,8 @@ pub struct DashboardState {
     collapsed_channel_categories: HashSet<Id<ChannelMarker>>,
     pending_read_acks: HashMap<Id<ChannelMarker>, PendingReadAck>,
     pending_commands: VecDeque<AppCommand>,
+    message_row_content_metrics_cache:
+        RefCell<HashMap<MessageRowContentMetricsCacheKey, MessageRowContentMetrics>>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -415,7 +436,36 @@ impl DashboardState {
             collapsed_channel_categories: HashSet::new(),
             pending_read_acks: HashMap::new(),
             pending_commands: VecDeque::new(),
+            message_row_content_metrics_cache: RefCell::new(HashMap::new()),
         }
+    }
+
+    fn clear_message_row_content_metrics_cache(&mut self) {
+        self.message_row_content_metrics_cache.get_mut().clear();
+    }
+
+    fn event_affects_message_row_content_metrics(event: &AppEvent) -> bool {
+        !matches!(
+            event,
+            AppEvent::TypingStart { .. }
+                | AppEvent::PresenceUpdate { .. }
+                | AppEvent::UserPresenceUpdate { .. }
+                | AppEvent::GuildMemberListCounts { .. }
+                | AppEvent::GuildFoldersUpdate { .. }
+                | AppEvent::UserNoteLoaded { .. }
+                | AppEvent::UserGuildNotificationSettingsInit { .. }
+                | AppEvent::UserGuildNotificationSettingsUpdate { .. }
+                | AppEvent::RelationshipsLoaded { .. }
+                | AppEvent::RelationshipUpsert { .. }
+                | AppEvent::RelationshipRemove { .. }
+                | AppEvent::ReadStateInit { .. }
+                | AppEvent::MessageAck { .. }
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn message_row_content_metrics_cache_len(&self) -> usize {
+        self.message_row_content_metrics_cache.borrow().len()
     }
 
     pub fn next_read_ack_deadline(&self) -> Option<Instant> {
@@ -454,6 +504,10 @@ impl DashboardState {
     }
 
     pub fn push_effect(&mut self, event: AppEvent) {
+        if let AppEvent::ChannelUpsert(channel) = &event {
+            self.record_thread_channel_upserted(channel);
+            return;
+        }
         self.push_event_inner(event, false);
     }
 
@@ -583,11 +637,17 @@ impl DashboardState {
                     channel_cursor_id = Some(channel_id);
                 }
             }
+            AppEvent::ChannelUpsert(channel) => {
+                self.record_thread_channel_upserted(channel);
+            }
             _ => {}
         }
         if apply_discord {
             let discord_event = self.discord_event_for_apply(&event);
             self.discord.apply_event(&discord_event);
+            if Self::event_affects_message_row_content_metrics(&discord_event) {
+                self.clear_message_row_content_metrics_cache();
+            }
         }
         if matches!(
             &event,
@@ -675,6 +735,27 @@ impl DashboardState {
     }
 
     pub fn restore_discord_snapshot(&mut self, discord: DiscordState) {
+        self.restore_discord_snapshot_with(SnapshotAreas::all(), |state| {
+            *state = discord;
+        });
+    }
+
+    pub fn restore_discord_snapshot_areas(
+        &mut self,
+        snapshot: &DiscordSnapshot,
+        previous_revision: SnapshotRevision,
+    ) {
+        let areas = snapshot.revision.changed_areas_since(previous_revision);
+        self.restore_discord_snapshot_with(areas, |state| {
+            state.restore_snapshot_areas(snapshot, previous_revision);
+        });
+    }
+
+    fn restore_discord_snapshot_with(
+        &mut self,
+        areas: SnapshotAreas,
+        restore: impl FnOnce(&mut DiscordState),
+    ) {
         let was_auto_follow = self.message_auto_follow;
         let was_at_latest = was_auto_follow || self.is_viewport_at_latest_message();
         let was_cursor_on_last = self.cursor_on_last_message();
@@ -697,7 +778,30 @@ impl DashboardState {
             .flatten();
         let channel_cursor_id = self.selected_channel_cursor_id();
 
-        self.discord = discord;
+        restore(&mut self.discord);
+        self.clear_message_row_content_metrics_cache();
+        if areas.navigation {
+            self.repair_navigation_after_discord_restore(channel_cursor_id);
+        }
+
+        let in_message_view =
+            !self.selected_channel_is_forum() && !self.is_pinned_message_view_active();
+        let should_follow = was_following_cursor && in_message_view;
+        let should_scroll = should_follow || (was_at_latest && in_message_view);
+        if areas.message || areas.navigation {
+            self.repair_message_after_discord_restore(
+                selected_message_id,
+                scroll_message_id,
+                should_follow,
+                should_scroll,
+            );
+        }
+    }
+
+    fn repair_navigation_after_discord_restore(
+        &mut self,
+        channel_cursor_id: Option<Id<ChannelMarker>>,
+    ) {
         if let Some(user) = self.discord.current_user() {
             self.current_user = Some(user.to_owned());
         }
@@ -708,11 +812,22 @@ impl DashboardState {
 
         self.clamp_active_selection();
         self.restore_channel_cursor(channel_cursor_id);
-        self.clamp_selection_indices();
-        let in_message_view =
-            !self.selected_channel_is_forum() && !self.is_pinned_message_view_active();
-        let should_follow = was_following_cursor && in_message_view;
-        let should_scroll = should_follow || (was_at_latest && in_message_view);
+        self.selected_guild = self.selected_guild();
+        self.selected_channel = self.selected_channel();
+        self.selected_member = self.selected_member();
+        self.clamp_guild_viewport();
+        self.clamp_channel_viewport();
+        self.clamp_member_viewport();
+    }
+
+    fn repair_message_after_discord_restore(
+        &mut self,
+        selected_message_id: Option<Id<MessageMarker>>,
+        scroll_message_id: Option<Id<MessageMarker>>,
+        should_follow: bool,
+        should_scroll: bool,
+    ) {
+        self.selected_message = self.selected_message();
         if should_follow {
             self.follow_latest_message();
         } else {
@@ -721,7 +836,6 @@ impl DashboardState {
         if should_scroll {
             self.message_auto_follow = true;
         }
-        self.clamp_list_viewports();
         self.clamp_message_viewport();
         if !should_scroll {
             self.refresh_message_auto_follow();
@@ -1233,6 +1347,31 @@ impl DashboardState {
         }
     }
 
+    fn record_thread_channel_upserted(&mut self, channel: &crate::discord::ChannelInfo) {
+        let is_thread = matches!(
+            channel.kind.as_str(),
+            "thread" | "GuildPublicThread" | "GuildPrivateThread" | "GuildNewsThread"
+        );
+        if !is_thread {
+            return;
+        }
+        let Some(parent_id) = channel.parent_id else {
+            return;
+        };
+        let Some(list) = self.forum_post_lists.get_mut(&parent_id) else {
+            return;
+        };
+        let id = channel.channel_id;
+        if list.active_post_ids.contains(&id) || list.archived_post_ids.contains(&id) {
+            return;
+        }
+        if channel.thread_archived == Some(true) {
+            list.archived_post_ids.insert(0, id);
+        } else {
+            list.active_post_ids.insert(0, id);
+        }
+    }
+
     fn record_forum_posts_loaded(
         &mut self,
         channel_id: Id<ChannelMarker>,
@@ -1423,6 +1562,7 @@ impl DashboardState {
     pub fn missing_thread_preview_load_requests(
         &self,
     ) -> Vec<(Id<ChannelMarker>, Id<MessageMarker>)> {
+        let mut seen = HashSet::new();
         self.visible_messages()
             .into_iter()
             .filter_map(|message| {
@@ -1433,6 +1573,19 @@ impl DashboardState {
                     .is_none()
                     .then_some((summary.channel_id, latest_message_id))
             })
+            .chain(
+                self.visible_forum_post_items()
+                    .into_iter()
+                    .filter_map(|post| {
+                        let latest_message_id = post.last_activity_message_id?;
+                        let missing_preview = post.preview_author.is_none()
+                            || post.preview_content.is_none()
+                            || post.preview_content.as_deref()
+                                == Some("<message content unavailable>");
+                        missing_preview.then_some((post.channel_id, latest_message_id))
+                    }),
+            )
+            .filter(|key| seen.insert(*key))
             .collect()
     }
 
@@ -1502,10 +1655,7 @@ impl DashboardState {
                 self.clamp_guild_viewport();
             }
             FocusPane::Channels => {
-                let len = self.channel_pane_filtered_entries().len();
-                move_index_down(&mut self.selected_channel, len);
-                self.channel_keep_selection_visible = true;
-                self.clamp_channel_viewport();
+                self.move_channel_selection_down();
             }
             FocusPane::Messages => {
                 let len = self.message_pane_item_count();
@@ -1531,9 +1681,7 @@ impl DashboardState {
                 self.clamp_guild_viewport();
             }
             FocusPane::Channels => {
-                move_index_up(&mut self.selected_channel);
-                self.channel_keep_selection_visible = true;
-                self.clamp_channel_viewport();
+                self.move_channel_selection_up();
             }
             FocusPane::Messages => {
                 move_index_up(&mut self.selected_message);
@@ -1557,9 +1705,7 @@ impl DashboardState {
                 self.clamp_guild_viewport();
             }
             FocusPane::Channels => {
-                self.selected_channel = 0;
-                self.channel_keep_selection_visible = true;
-                self.clamp_channel_viewport();
+                self.jump_channel_selection_top();
             }
             FocusPane::Messages => {
                 self.selected_message = 0;
@@ -1583,9 +1729,7 @@ impl DashboardState {
                 self.clamp_guild_viewport();
             }
             FocusPane::Channels => {
-                self.selected_channel = last_index(self.channel_pane_filtered_entries().len());
-                self.channel_keep_selection_visible = true;
-                self.clamp_channel_viewport();
+                self.jump_channel_selection_bottom();
             }
             FocusPane::Messages => {
                 self.selected_message = last_index(self.message_pane_item_count());
@@ -1612,10 +1756,7 @@ impl DashboardState {
             }
             FocusPane::Channels => {
                 let distance = pane_content_height(self.channel_view_height) / 2;
-                let len = self.channel_pane_filtered_entries().len();
-                move_index_down_by(&mut self.selected_channel, len, distance.max(1));
-                self.channel_keep_selection_visible = true;
-                self.clamp_channel_viewport();
+                self.move_channel_selection_down_by(distance.max(1));
             }
             FocusPane::Messages => {
                 let distance = self.message_content_height() / 2;
@@ -1646,9 +1787,7 @@ impl DashboardState {
             }
             FocusPane::Channels => {
                 let distance = pane_content_height(self.channel_view_height) / 2;
-                move_index_up_by(&mut self.selected_channel, distance.max(1));
-                self.channel_keep_selection_visible = true;
-                self.clamp_channel_viewport();
+                self.move_channel_selection_up_by(distance.max(1));
             }
             FocusPane::Messages => {
                 let distance = self.message_content_height() / 2;
@@ -1748,6 +1887,9 @@ impl DashboardState {
             .map(|entry| match entry {
                 ChannelPaneEntry::CategoryHeader { state, .. }
                 | ChannelPaneEntry::Channel { state, .. } => state.name.width().saturating_sub(1),
+                ChannelPaneEntry::VoiceParticipant { participant, .. } => {
+                    participant.display_name.width().saturating_sub(1)
+                }
             })
             .max()
             .unwrap_or_default()
@@ -1845,7 +1987,11 @@ impl DashboardState {
 
     fn select_visible_channel_row(&mut self, row: usize) -> bool {
         let index = self.channel_scroll.saturating_add(row);
-        if index >= self.channel_pane_filtered_entries().len() {
+        let entries = self.channel_pane_filtered_entries();
+        if !entries
+            .get(index)
+            .is_some_and(ChannelPaneEntry::is_selectable)
+        {
             return false;
         }
         self.selected_channel = index;
@@ -2059,7 +2205,7 @@ impl DashboardState {
         ) {
             return false;
         }
-        !self.discord.user_activities(member.user_id()).is_empty()
+        !self.user_activities(member.user_id()).is_empty()
     }
 
     fn active_channel_message_create(

@@ -1,8 +1,6 @@
-use std::time::Instant;
-
 use serde_json::Value;
 
-use crate::{discord::events::AppEvent, logging};
+use crate::discord::events::AppEvent;
 
 mod channels;
 mod guilds;
@@ -12,6 +10,7 @@ mod presence;
 mod ready;
 mod relationships;
 mod shared;
+mod voice;
 
 pub(crate) use channels::parse_channel_info;
 use channels::{parse_channel_delete, parse_channel_upsert, parse_thread_list_sync};
@@ -32,6 +31,7 @@ use messages::{
 use presence::{parse_presence_update, parse_typing_start};
 use ready::{parse_ready, parse_ready_supplemental};
 use relationships::{parse_relationship_add, parse_relationship_remove, parse_relationship_update};
+use voice::{parse_guild_voice_states, parse_voice_state_update};
 
 /// Best-effort fallback that rebuilds the dashboard's domain events directly
 /// from the raw gateway payload. We only extract the fields the UI consumes,
@@ -52,9 +52,8 @@ pub(super) fn parse_user_account_event(raw: &str) -> Vec<AppEvent> {
         "READY" => parse_ready(data),
         "READY_SUPPLEMENTAL" => parse_ready_supplemental(data),
         "GUILD_CREATE" => {
-            let started = Instant::now();
-            let result = parse_guild_create(data).into_iter().collect();
-            logging::timing("gateway", "fallback guild_create parse", started.elapsed());
+            let mut result: Vec<AppEvent> = parse_guild_create(data).into_iter().collect();
+            result.extend(parse_guild_voice_states(data));
             result
         }
         "GUILD_UPDATE" => parse_guild_update(data).into_iter().collect(),
@@ -89,6 +88,7 @@ pub(super) fn parse_user_account_event(raw: &str) -> Vec<AppEvent> {
         "RELATIONSHIP_REMOVE" => parse_relationship_remove(data).into_iter().collect(),
         "GUILD_MEMBER_REMOVE" => parse_member_remove(data).into_iter().collect(),
         "PRESENCE_UPDATE" => parse_presence_update(data),
+        "VOICE_STATE_UPDATE" => parse_voice_state_update(data).into_iter().collect(),
         "TYPING_START" => parse_typing_start(data).into_iter().collect(),
         _ => Vec::new(),
     }
@@ -151,6 +151,166 @@ mod tests {
                 if *guild_id == Id::new(10)
                     && *user_id == Id::new(20)
                     && *status == PresenceStatus::Idle
+        )));
+    }
+
+    #[test]
+    fn raw_voice_state_update_extracts_channel_and_member() {
+        let events = parse_user_account_event(
+            &json!({
+                "t": "VOICE_STATE_UPDATE",
+                "d": {
+                    "guild_id": "10",
+                    "channel_id": "30",
+                    "user_id": "20",
+                    "deaf": false,
+                    "mute": true,
+                    "self_deaf": false,
+                    "self_mute": true,
+                    "self_stream": true,
+                    "member": {
+                        "user": {
+                            "id": "20",
+                            "username": "alice",
+                            "global_name": "Alice"
+                        },
+                        "nick": "Alice Nick",
+                        "roles": ["40"]
+                    }
+                }
+            })
+            .to_string(),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::VoiceStateUpdate { state }
+                if state.guild_id == Id::new(10)
+                    && state.channel_id == Some(Id::new(30))
+                    && state.user_id == Id::new(20)
+                    && state.mute
+                    && state.self_mute
+                    && state.self_stream
+                    && state.member.as_ref().is_some_and(|member|
+                        member.display_name == "Alice Nick" && member.role_ids == vec![Id::new(40)]
+                    )
+        )));
+    }
+
+    #[test]
+    fn raw_voice_state_update_extracts_leave_payload() {
+        let events = parse_user_account_event(
+            &json!({
+                "t": "VOICE_STATE_UPDATE",
+                "d": {
+                    "guild_id": "10",
+                    "channel_id": null,
+                    "user_id": "20"
+                }
+            })
+            .to_string(),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::VoiceStateUpdate { state }
+                if state.guild_id == Id::new(10)
+                    && state.channel_id.is_none()
+                    && state.user_id == Id::new(20)
+        )));
+    }
+
+    #[test]
+    fn raw_guild_create_emits_initial_voice_states() {
+        let events = parse_user_account_event(
+            &json!({
+                "t": "GUILD_CREATE",
+                "d": {
+                    "id": "10",
+                    "name": "guild",
+                    "channels": [],
+                    "voice_states": [{
+                        "channel_id": "30",
+                        "user_id": "20",
+                        "self_stream": true
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::GuildCreate { guild_id, .. } if *guild_id == Id::new(10)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::VoiceStateUpdate { state }
+                if state.guild_id == Id::new(10)
+                    && state.channel_id == Some(Id::new(30))
+                    && state.user_id == Id::new(20)
+                    && state.self_stream
+        )));
+    }
+
+    #[test]
+    fn raw_ready_parser_emits_initial_voice_states_from_embedded_guilds() {
+        let events = parse_user_account_event(
+            &json!({
+                "t": "READY",
+                "d": {
+                    "user": { "id": "1", "username": "me" },
+                    "guilds": [{
+                        "id": "10",
+                        "name": "guild",
+                        "channels": [],
+                        "voice_states": [{
+                            "channel_id": "30",
+                            "user_id": "20"
+                        }]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::GuildCreate { guild_id, .. } if *guild_id == Id::new(10)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::VoiceStateUpdate { state }
+                if state.guild_id == Id::new(10)
+                    && state.channel_id == Some(Id::new(30))
+                    && state.user_id == Id::new(20)
+        )));
+    }
+
+    #[test]
+    fn raw_ready_supplemental_emits_voice_states_from_embedded_guilds() {
+        let events = parse_user_account_event(
+            &json!({
+                "t": "READY_SUPPLEMENTAL",
+                "d": {
+                    "guilds": [{
+                        "id": "10",
+                        "voice_states": [{
+                            "channel_id": "30",
+                            "user_id": "20"
+                        }]
+                    }]
+                }
+            })
+            .to_string(),
+        );
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AppEvent::VoiceStateUpdate { state }
+                if state.guild_id == Id::new(10)
+                    && state.channel_id == Some(Id::new(30))
+                    && state.user_id == Id::new(20)
         )));
     }
 

@@ -17,13 +17,13 @@ use super::{
     composer_lines, composer_lines_with_loaded_custom_emoji_urls, composer_prompt_line_count,
     composer_text, date_separator_line, debug_log_popup_lines, dm_presence_dot_span,
     emoji_picker_lines, emoji_reaction_picker_lines, emoji_reaction_picker_lines_for_width,
-    filtered_emoji_reaction_picker_lines, focus_pane_at, format_message_sent_time,
-    forum_post_reaction_summary, forum_post_scrollbar_visible_count, forum_post_viewport_lines,
-    image_viewer_image_area, image_viewer_popup, inline_image_preview_area,
-    inline_image_preview_row, member_display_label, member_name_style, message_action_menu_lines,
-    message_author_style, message_body_custom_emoji_rows, message_delete_confirmation_lines,
-    message_item_lines, message_pin_confirmation_lines, message_viewport_lines,
-    new_messages_notice_line, options_popup_lines, poll_vote_picker_lines,
+    emoji_reaction_picker_lines_with_existing, filtered_emoji_reaction_picker_lines, focus_pane_at,
+    format_message_sent_time, forum_post_reaction_summary, forum_post_scrollbar_visible_count,
+    forum_post_viewport_lines, image_viewer_image_area, image_viewer_popup,
+    inline_image_preview_area, inline_image_preview_row, member_display_label, member_name_style,
+    message_action_menu_lines, message_author_style, message_body_custom_emoji_rows,
+    message_delete_confirmation_lines, message_item_lines, message_pin_confirmation_lines,
+    message_viewport_lines, new_messages_notice_line, options_popup_lines, poll_vote_picker_lines,
     primary_activity_summary, reaction_users_popup_lines, reaction_users_visible_line_count,
     render_channels, render_guilds, selected_avatar_x_offset, selected_message_card_width,
     selected_message_content_x_offset, sync_view_heights, toast_area, toast_line,
@@ -44,6 +44,7 @@ use crate::{
         MessageInfo, MessageKind, MessageSnapshotInfo, MessageState, MutualGuildInfo,
         NotificationLevel, PollAnswerInfo, PollInfo, PresenceStatus, ReactionEmoji, ReactionInfo,
         ReactionUserInfo, ReactionUsersInfo, ReadStateInfo, ReplyInfo, RoleInfo, UserProfileInfo,
+        VoiceStateInfo,
     },
     tui::{
         format::{TextHighlightKind, truncate_display_width, truncate_display_width_from},
@@ -1294,6 +1295,271 @@ fn dm_channel_pane_shows_loaded_unread_message_count_badge() {
 }
 
 #[test]
+fn channel_pane_shows_voice_participants_under_voice_channel() {
+    let guild_id = Id::new(1);
+    let text_id = Id::new(9);
+    let voice_id = Id::new(10);
+    let empty_voice_id = Id::new(11);
+    let alice = Id::new(20);
+    let mut state = DashboardState::new();
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![
+            ChannelInfo {
+                guild_id: Some(guild_id),
+                channel_id: text_id,
+                parent_id: None,
+                position: Some(0),
+                last_message_id: None,
+                name: "general".to_owned(),
+                kind: "GuildText".to_owned(),
+                message_count: None,
+                total_message_sent: None,
+                thread_archived: None,
+                thread_locked: None,
+                thread_pinned: None,
+                recipients: None,
+                permission_overwrites: Vec::new(),
+            },
+            ChannelInfo {
+                guild_id: Some(guild_id),
+                channel_id: voice_id,
+                parent_id: None,
+                position: Some(2),
+                last_message_id: None,
+                name: "Lobby".to_owned(),
+                kind: "GuildVoice".to_owned(),
+                message_count: None,
+                total_message_sent: None,
+                thread_archived: None,
+                thread_locked: None,
+                thread_pinned: None,
+                recipients: None,
+                permission_overwrites: Vec::new(),
+            },
+            ChannelInfo {
+                guild_id: Some(guild_id),
+                channel_id: empty_voice_id,
+                parent_id: None,
+                position: Some(1),
+                last_message_id: None,
+                name: "Empty".to_owned(),
+                kind: "GuildVoice".to_owned(),
+                message_count: None,
+                total_message_sent: None,
+                thread_archived: None,
+                thread_locked: None,
+                thread_pinned: None,
+                recipients: None,
+                permission_overwrites: Vec::new(),
+            },
+        ],
+        members: vec![MemberInfo {
+            user_id: alice,
+            display_name: "Alice".to_owned(),
+            username: Some("alice".to_owned()),
+            is_bot: false,
+            avatar_url: None,
+            role_ids: Vec::new(),
+        }],
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.push_event(AppEvent::VoiceStateUpdate {
+        state: VoiceStateInfo {
+            guild_id,
+            channel_id: Some(voice_id),
+            user_id: alice,
+            member: None,
+            deaf: true,
+            mute: true,
+            self_deaf: false,
+            self_mute: false,
+            self_stream: true,
+        },
+    });
+    state.confirm_selected_guild();
+    state.set_channel_view_height(10);
+
+    let backend = TestBackend::new(40, 9);
+    let mut terminal = Terminal::new(backend).expect("test terminal should build");
+    terminal
+        .draw(|frame| render_channels(frame, frame.area(), &state))
+        .expect("draw should succeed");
+
+    let buffer = terminal.backend().buffer();
+    let channel_rows = (0..buffer.area.height)
+        .map(|row| {
+            (0..buffer.area.width)
+                .map(|col| buffer[(col, row)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let lobby_row = (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|col| buffer[(col, *row)].symbol().to_owned())
+                .collect::<String>()
+                .contains("Lobby")
+        })
+        .expect("populated voice row should render");
+    let lobby_icon_col = (0..buffer.area.width)
+        .find(|col| buffer[(*col, lobby_row)].symbol() == "🔊")
+        .expect("populated voice row should use loud speaker icon");
+    assert_eq!(buffer[(lobby_icon_col, lobby_row)].fg, Color::Cyan);
+
+    let empty_row = (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|col| buffer[(col, *row)].symbol().to_owned())
+                .collect::<String>()
+                .contains("Empty")
+        })
+        .expect("empty voice row should render");
+    let empty_icon_col = (0..buffer.area.width)
+        .find(|col| buffer[(*col, empty_row)].symbol() == "🔈")
+        .expect("empty voice row should use quiet speaker icon");
+    assert_eq!(buffer[(empty_icon_col, empty_row)].fg, DIM);
+
+    assert!(
+        channel_rows.iter().any(|row| row.contains("Alice")),
+        "{}",
+        channel_rows.join("\n")
+    );
+    assert!(
+        channel_rows.iter().any(|row| row.contains("LIVE")),
+        "{}",
+        channel_rows.join("\n")
+    );
+    assert!(
+        channel_rows.iter().any(|row| row.contains("Alice")
+            && row.contains("LIVE")
+            && row.contains("🔇")
+            && row.contains("🎧")
+            && row.find("LIVE") < row.find("🔇")
+            && row.find("🔇") < row.find("🎧")),
+        "{}",
+        channel_rows.join("\n")
+    );
+    assert!(
+        (0..buffer.area.height)
+            .any(|row| (0..buffer.area.width).any(|col| buffer[(col, row)].symbol() == "🔴"))
+    );
+
+    state.focus_pane(FocusPane::Channels);
+    state.set_channel_view_height(1);
+    state.scroll_focused_pane_viewport_down();
+    state.scroll_focused_pane_viewport_down();
+    let backend = TestBackend::new(40, 4);
+    let mut terminal = Terminal::new(backend).expect("test terminal should build");
+    terminal
+        .draw(|frame| render_channels(frame, frame.area(), &state))
+        .expect("draw should succeed");
+
+    let buffer = terminal.backend().buffer();
+    let channel_rows = (0..buffer.area.height)
+        .map(|row| {
+            (0..buffer.area.width)
+                .map(|col| buffer[(col, row)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !channel_rows.iter().any(|row| row.contains("Alice")),
+        "{}",
+        channel_rows.join("\n")
+    );
+    let lobby_row = (0..buffer.area.height)
+        .find(|row| {
+            (0..buffer.area.width)
+                .map(|col| buffer[(col, *row)].symbol().to_owned())
+                .collect::<String>()
+                .contains("Lobby")
+        })
+        .expect("voice row should be visible");
+    let lobby_icon_col = (0..buffer.area.width)
+        .find(|col| buffer[(*col, lobby_row)].symbol() == "🔊")
+        .expect("populated voice row should keep loud speaker icon");
+    assert_eq!(buffer[(lobby_icon_col, lobby_row)].fg, Color::Cyan);
+}
+
+#[test]
+fn channel_pane_filter_width_uses_filtered_entry_count() {
+    let guild_id = Id::new(1);
+    let matching_name = "abcdefghijklmnopqrstuvwxzy";
+    let channels = (0..12)
+        .map(|index| ChannelInfo {
+            guild_id: Some(guild_id),
+            channel_id: Id::new(10 + index),
+            parent_id: None,
+            position: Some(i32::try_from(index).expect("test index should fit i32")),
+            last_message_id: None,
+            name: if index == 0 {
+                matching_name.to_owned()
+            } else {
+                format!("other-{index}")
+            },
+            kind: "GuildText".to_owned(),
+            message_count: None,
+            total_message_sent: None,
+            thread_archived: None,
+            thread_locked: None,
+            thread_pinned: None,
+            recipients: None,
+            permission_overwrites: Vec::new(),
+        })
+        .collect();
+    let mut state = DashboardState::new();
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels,
+        members: Vec::new(),
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.confirm_selected_guild();
+    state.open_channel_pane_filter();
+    for value in matching_name.chars() {
+        state.push_channel_pane_filter_char(value);
+    }
+    state.set_channel_view_height(10);
+
+    let backend = TestBackend::new(32, 6);
+    let mut terminal = Terminal::new(backend).expect("test terminal should build");
+    terminal
+        .draw(|frame| render_channels(frame, frame.area(), &state))
+        .expect("draw should succeed");
+
+    let buffer = terminal.backend().buffer();
+    let channel_rows = (0..buffer.area.height)
+        .map(|row| {
+            (0..buffer.area.width)
+                .map(|col| buffer[(col, row)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        channel_rows.iter().any(|row| row.contains(matching_name)),
+        "{}",
+        channel_rows.join("\n")
+    );
+    assert!(
+        !channel_rows.iter().any(|row| row.contains("┃")),
+        "{}",
+        channel_rows.join("\n")
+    );
+}
+
+#[test]
 fn muted_category_and_channel_names_are_dimmed() {
     let mut state = DashboardState::new();
     let guild_id = Id::new(1);
@@ -2288,6 +2554,247 @@ fn message_content_preserves_explicit_newlines() {
 }
 
 #[test]
+fn message_content_applies_supported_markdown_formatting() {
+    let message = message_with_content(Some(
+        "# Project Update\n## Highlights\n### Detail\nMessage body\n> Keep the layout calm\n>\nNext paragraph\n- First action\n* Alternate action\nUse **bold**, *italic*, and `code` text\n```rust\nlet answer = 42;\n**not bold in code**\n```\nAfter"
+            .to_owned(),
+    ));
+
+    let lines = format_message_content_lines(&message, &DashboardState::new(), 200);
+
+    assert_eq!(
+        line_texts(&lines),
+        vec![
+            "# Project Update",
+            "## Highlights",
+            "### Detail",
+            "Message body",
+            "▎ Keep the layout calm",
+            "▎ ",
+            "Next paragraph",
+            "• First action",
+            "• Alternate action",
+            "Use bold, italic, and code text",
+            "╭─ rust ───────────────╮",
+            "│ let answer = 42;     │",
+            "│ **not bold in code** │",
+            "╰──────────────────────╯",
+            "After",
+        ]
+    );
+
+    assert_eq!(lines[0].style.fg, Some(ACCENT));
+    assert!(lines[0].style.add_modifier.contains(Modifier::BOLD));
+    assert!(lines[1].style.add_modifier.contains(Modifier::BOLD));
+    assert!(lines[1].style.add_modifier.contains(Modifier::UNDERLINED));
+    assert!(lines[2].style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(lines[4].style.fg, Some(DIM));
+    assert_eq!(lines[14].style, Style::default());
+
+    let h1_spans = lines[0].spans();
+    assert_eq!(h1_spans[0].content.as_ref(), "# ");
+    assert_eq!(h1_spans[0].style.fg, Some(DIM));
+
+    let h2_spans = lines[1].spans();
+    assert_eq!(h2_spans[0].content.as_ref(), "## ");
+    assert_eq!(h2_spans[0].style.fg, Some(DIM));
+
+    let h3_spans = lines[2].spans();
+    assert_eq!(h3_spans[0].content.as_ref(), "### ");
+    assert_eq!(h3_spans[0].style.fg, Some(DIM));
+
+    let quote_spans = lines[4].spans();
+    assert_eq!(quote_spans[0].content.as_ref(), "▎ ");
+    assert_eq!(quote_spans[0].style.fg, Some(DIM));
+
+    for line in [&lines[7], &lines[8]] {
+        let bullet_spans = line.spans();
+        assert_eq!(bullet_spans[0].content.as_ref(), "• ");
+        assert_eq!(bullet_spans[0].style.fg, Some(DIM));
+    }
+
+    let inline_spans = lines[9].spans();
+    let bold = inline_spans
+        .iter()
+        .find(|span| span.content == "bold")
+        .expect("bold span should be present");
+    assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+
+    let italic = inline_spans
+        .iter()
+        .find(|span| span.content == "italic")
+        .expect("italic span should be present");
+    assert!(italic.style.add_modifier.contains(Modifier::ITALIC));
+
+    let code = inline_spans
+        .iter()
+        .find(|span| span.content == "code")
+        .expect("code span should be present");
+    assert_eq!(code.style.fg, Some(Color::Rgb(255, 165, 0)));
+    assert_eq!(code.style.bg, None);
+
+    assert_eq!(lines[10].style.fg, Some(DIM));
+    assert_eq!(lines[13].style.fg, Some(DIM));
+
+    let code_line = lines[11].spans();
+    assert_eq!(code_line[0].content.as_ref(), "│ ");
+    assert_eq!(code_line[0].style.fg, Some(DIM));
+    assert_eq!(code_line[1].content.as_ref(), "let answer = 42;    ");
+    assert_eq!(code_line[1].style.fg, Some(Color::White));
+    assert_eq!(code_line[1].style.bg, None);
+    assert_eq!(code_line[2].content.as_ref(), " │");
+    assert_eq!(code_line[2].style.fg, Some(DIM));
+
+    let literal_code_line = lines[12].spans();
+    assert_eq!(
+        literal_code_line[1].content.as_ref(),
+        "**not bold in code**"
+    );
+    assert!(
+        !literal_code_line[1]
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD)
+    );
+
+    let mut quote = message_with_content(Some("> hello <@10>".to_owned()));
+    quote.mentions = vec![mention_info(10, "alice")];
+    let quote_lines = format_message_content_lines(&quote, &DashboardState::new(), 200);
+    let mention = quote_lines[0]
+        .spans()
+        .into_iter()
+        .find(|span| span.content == "@alice")
+        .expect("mention span should survive quote formatting");
+    assert_eq!(
+        mention.style.bg,
+        mention_highlight_style(TextHighlightKind::OtherMention).bg
+    );
+
+    let emoji = message_with_content(Some("- <:party:99> party".to_owned()));
+    let loaded_urls = vec!["https://cdn.discordapp.com/emojis/99.png".to_owned()];
+    let emoji_lines = format_message_content_lines_with_loaded_custom_emoji_urls(
+        &emoji,
+        &DashboardState::new(),
+        200,
+        &loaded_urls,
+    );
+    assert_eq!(emoji_lines[0].image_slots[0].col, 2);
+    assert_eq!(emoji_lines[0].image_slots[0].byte_start, "• ".len());
+
+    let wrapped = message_with_content(Some("**abcdef**".to_owned()));
+    let wrapped_lines = format_message_content_lines(&wrapped, &DashboardState::new(), 3);
+    assert_eq!(line_texts(&wrapped_lines), vec!["abc", "def"]);
+    assert!(
+        wrapped_lines
+            .iter()
+            .all(|line| line.spans()[0].style.add_modifier.contains(Modifier::BOLD))
+    );
+
+    let mut mention = message_with_content(Some("**<@10>**".to_owned()));
+    mention.mentions = vec![mention_info(10, "alice")];
+    let mention_lines = format_message_content_lines(&mention, &DashboardState::new(), 200);
+    let mention_span = mention_lines[0]
+        .spans()
+        .into_iter()
+        .find(|span| span.content == "@alice")
+        .expect("mention span should survive inline formatting");
+    assert!(mention_span.style.add_modifier.contains(Modifier::BOLD));
+    assert_eq!(
+        mention_span.style.bg,
+        mention_highlight_style(TextHighlightKind::OtherMention).bg
+    );
+
+    let emoji = message_with_content(Some("**<:party:99>**".to_owned()));
+    let emoji_lines = format_message_content_lines_with_loaded_custom_emoji_urls(
+        &emoji,
+        &DashboardState::new(),
+        200,
+        &loaded_urls,
+    );
+    assert_eq!(line_texts(&emoji_lines), vec!["  "]);
+    assert_eq!(emoji_lines[0].image_slots[0].col, 0);
+    assert_eq!(emoji_lines[0].image_slots[0].byte_start, 0);
+
+    let quote = message_with_content(Some("> **bold quote**".to_owned()));
+    let quote_lines = format_message_content_lines(&quote, &DashboardState::new(), 200);
+    let quote_span = quote_lines[0]
+        .spans()
+        .into_iter()
+        .find(|span| span.content == "bold quote")
+        .expect("inline bold span should survive quote formatting");
+    assert_eq!(quote_span.style.fg, Some(DIM));
+    assert!(quote_span.style.add_modifier.contains(Modifier::BOLD));
+
+    let lines = format_message_content_lines(
+        &message_with_content(Some("```\nabcdefghijkl\n```".to_owned())),
+        &DashboardState::new(),
+        9,
+    );
+    assert_eq!(
+        line_texts(&lines),
+        vec![
+            "╭───────╮",
+            "│ abcde │",
+            "│ fghij │",
+            "│ kl    │",
+            "╰───────╯",
+        ]
+    );
+    assert_eq!(lines[1].spans()[1].style.fg, Some(Color::White));
+
+    let lines = format_message_content_lines(
+        &message_with_content(Some("```".to_owned())),
+        &DashboardState::new(),
+        200,
+    );
+    assert_eq!(line_texts(&lines), vec!["```"]);
+    assert_eq!(lines[0].style, Style::default());
+
+    let lines = format_message_content_lines(
+        &message_with_content(Some("```\none\n\nthree\n```".to_owned())),
+        &DashboardState::new(),
+        200,
+    );
+    assert_eq!(
+        line_texts(&lines),
+        vec![
+            "╭───────╮",
+            "│ one   │",
+            "│       │",
+            "│ three │",
+            "╰───────╯",
+        ]
+    );
+
+    let lines = format_message_content_lines(
+        &message_with_content(Some("```\n漢字仮名交じ\n```".to_owned())),
+        &DashboardState::new(),
+        10,
+    );
+    assert_eq!(
+        line_texts(&lines),
+        vec!["╭────────╮", "│ 漢字仮 │", "│ 名交じ │", "╰────────╯",]
+    );
+
+    let lines = format_message_content_lines_with_loaded_custom_emoji_urls(
+        &message_with_content(Some("```\n- not a bullet\n<:party:99>\n```".to_owned())),
+        &DashboardState::new(),
+        200,
+        &loaded_urls,
+    );
+    assert_eq!(
+        line_texts(&lines),
+        vec![
+            "╭────────────────╮",
+            "│ - not a bullet │",
+            "│ :party:        │",
+            "╰────────────────╯",
+        ]
+    );
+    assert!(lines.iter().all(|line| line.image_slots.is_empty()));
+    assert_eq!(lines[1].spans()[1].style.fg, Some(Color::White));
+}
+#[test]
 fn message_content_wraps_long_lines_to_content_width() {
     let message = message_with_content(Some("abcdefghijkl".to_owned()));
 
@@ -3196,6 +3703,36 @@ fn emoji_reaction_picker_marks_selected_reaction() {
     assert_eq!(
         line_texts_from_ratatui(&lines),
         vec!["  [1] 👍 Thumbs up", "› [2] :party: Party",]
+    );
+}
+
+#[test]
+fn emoji_reaction_picker_uses_qwerty_shortcuts_for_existing_reactions() {
+    let reactions = vec![
+        EmojiReactionItem {
+            emoji: ReactionEmoji::Unicode("👍".to_owned()),
+            label: "Thumbs up".to_owned(),
+        },
+        EmojiReactionItem {
+            emoji: ReactionEmoji::Unicode("❤️".to_owned()),
+            label: "Heart".to_owned(),
+        },
+        EmojiReactionItem {
+            emoji: ReactionEmoji::Unicode("😂".to_owned()),
+            label: "Joy".to_owned(),
+        },
+    ];
+    let existing_reactions = vec![
+        ReactionEmoji::Unicode("👍".to_owned()),
+        ReactionEmoji::Unicode("❤️".to_owned()),
+    ];
+
+    let lines =
+        emoji_reaction_picker_lines_with_existing(&reactions, &existing_reactions, 0, 10, &[]);
+
+    assert_eq!(
+        line_texts_from_ratatui(&lines),
+        vec!["› [q] 👍 Thumbs up", "  [w] ❤️ Heart", "  [1] 😂 Joy"]
     );
 }
 

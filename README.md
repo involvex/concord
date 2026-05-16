@@ -120,6 +120,18 @@ Tokens are saved under Concord's config directory in plain text. See the Securit
 - Direct message shortcuts for copy, reply, edit, delete, pin/unpin, reactions,
   image viewing, and profile lookup
 
+#### Markdown Rendering
+
+![Markdown rendering example](./docs/markdown-example.png)
+
+Concord renders a practical subset of Discord-style Markdown in message bodies:
+
+- Headings: `# H1`, `## H2`, `### H3`
+- Quotes: `> quoted text`
+- Bullets: `- item` and `* item`
+- Inline styles: `**bold**`, `*italic*`, and `` `inline code` ``
+- Fenced code blocks with optional language labels, rendered as compact boxes
+
 ### Reactions & Polls
 
 - View, add, and remove emoji reactions (Unicode and custom server emoji)
@@ -242,11 +254,14 @@ number key directly shows and focuses it again.
 #### Composer
 
 You can paste copied files into the composer to attach them. Pending uploads
-are shown above the input before sending, and `Ctrl+Backspace` removes the last
-pending attachment.
+are shown above the input before sending.
 
-Use `Ctrl+Left` / `Ctrl+Right` to jump the cursor by word.
-Use `Ctrl+c` to clear the current draft.
+| Shortcut                  | Action            | Description                                        |
+| ------------------------- | ----------------- | -------------------------------------------------- |
+| `Ctrl+e`                  | open $EDITOR      | Open $EDITOR on the current draft for long editing |
+| `Ctrl+c`                  | clear             | Clear current draft                                |
+| `Ctrl+Left`/ `Ctrl+Right` | Jump word         | Jump the cursor by word                            |
+| `Ctrl+Backspace`          | Detach attachment | Removes the last pending attachment                |
 
 #### Mention picker
 

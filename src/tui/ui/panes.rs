@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use ratatui::{
     Frame,
     layout::{Alignment, Position, Rect},
@@ -25,7 +27,10 @@ use super::{
     active_text_style,
     activity::{ActivityLeading, ActivityRender, build_activity_render},
     channel_prefix, channel_unread_decoration, dm_presence_dot_span, highlight_style,
-    layout::{composer_inner_width, panel_scrollbar_area, prefixed_composer_input},
+    layout::{
+        composer_inner_width, panel_scrollbar_area, prefixed_composer_input,
+        vertical_scrollbar_visible,
+    },
     panel_block, panel_block_line, panel_content_height, render_vertical_scrollbar,
     selection_marker, styled_list_item,
     types::{ACCENT, DIM, EmojiImage, MessageAreas},
@@ -299,10 +304,47 @@ pub(super) fn render_channels(frame: &mut Frame, area: Rect, state: &DashboardSt
         (channels_area, None)
     };
 
-    let entries = state.visible_channel_pane_entries();
-    let max_width = list_area.width.saturating_sub(8) as usize;
+    let channel_entries = state.channel_pane_filtered_entries();
+    let channel_entry_count = channel_entries.len();
+    let all_channel_entries;
+    let populated_channel_entries = if state.channel_pane_filter_query().is_some() {
+        all_channel_entries = state.channel_pane_entries();
+        all_channel_entries.as_slice()
+    } else {
+        channel_entries.as_slice()
+    };
+    let populated_voice_channel_ids: HashSet<_> = populated_channel_entries
+        .windows(2)
+        .filter_map(|window| match (&window[0], &window[1]) {
+            (
+                ChannelPaneEntry::Channel { state: channel, .. },
+                ChannelPaneEntry::VoiceParticipant { .. },
+            ) => Some(channel.id),
+            _ => None,
+        })
+        .collect();
+    let channel_scroll = state.channel_scroll();
+    let selected_channel = (state.focus() == FocusPane::Channels && channel_entry_count > 0)
+        .then(|| state.selected_channel_from_entries(&channel_entries));
+    let entries: Vec<_> = channel_entries
+        .into_iter()
+        .skip(channel_scroll)
+        .take(list_area.height as usize)
+        .collect();
+    let scrollbar_width = usize::from(vertical_scrollbar_visible(
+        list_area,
+        list_area.height as usize,
+        channel_entry_count,
+    ));
+    let max_width = (list_area.width as usize)
+        .saturating_sub(selection_marker(false).content.width())
+        .saturating_sub(scrollbar_width);
     let horizontal_scroll = state.channel_horizontal_scroll();
-    let selected = state.focused_channel_selection();
+    let selected = selected_channel
+        .filter(|selected| {
+            *selected >= channel_scroll && *selected < channel_scroll + entries.len()
+        })
+        .map(|selected| selected - channel_scroll);
     let items: Vec<ListItem> = entries
         .iter()
         .enumerate()
@@ -334,10 +376,13 @@ pub(super) fn render_channels(frame: &mut Frame, area: Rect, state: &DashboardSt
                     }
                     ChannelPaneEntry::Channel { state, branch } => {
                         let branch_prefix = branch.prefix();
-                        let prefix_span = dm_presence_dot_span(state).unwrap_or_else(|| {
-                            Span::styled(channel_prefix(&state.kind), Style::default().fg(DIM))
-                        });
-                        let prefix_width = prefix_span.content.width();
+                        let dm_prefix_span = dm_presence_dot_span(state);
+                        let channel_prefix = channel_prefix(&state.kind);
+                        let prefix_width = dm_prefix_span
+                            .as_ref()
+                            .map_or_else(|| channel_prefix.width(), |span| span.content.width());
+                        let populated_voice_channel =
+                            state.is_voice() && populated_voice_channel_ids.contains(&state.id);
                         let base_style = active_text_style(is_active, Style::default());
                         let is_muted = dashboard.channel_notification_muted(state.id);
                         let unread = dashboard.sidebar_channel_unread(state.id);
@@ -377,7 +422,14 @@ pub(super) fn render_channels(frame: &mut Frame, area: Rect, state: &DashboardSt
                         if let Some(badge) = badge {
                             spans.push(badge);
                         }
-                        spans.push(prefix_span);
+                        if let Some(prefix_span) = dm_prefix_span {
+                            spans.push(prefix_span);
+                        } else if populated_voice_channel {
+                            spans.push(Span::styled("🔊", Style::default().fg(Color::Cyan)));
+                            spans.push(Span::styled(" ", Style::default().fg(DIM)));
+                        } else {
+                            spans.push(Span::styled(channel_prefix, Style::default().fg(DIM)));
+                        }
                         spans.push(Span::styled(
                             truncate_display_width_from(
                                 &state.name,
@@ -387,6 +439,36 @@ pub(super) fn render_channels(frame: &mut Frame, area: Rect, state: &DashboardSt
                             name_style,
                         ));
                         ListItem::new(Line::from(spans))
+                    }
+                    ChannelPaneEntry::VoiceParticipant {
+                        participant,
+                        parent_branch,
+                        ..
+                    } => {
+                        let branch_prefix = parent_branch.participant_prefix();
+                        let mut label = participant.display_name.clone();
+                        if participant.self_stream {
+                            label.push_str(" 🔴 LIVE");
+                        }
+                        if participant.mute || participant.self_mute {
+                            label.push_str(" 🔇");
+                        }
+                        if participant.deaf || participant.self_deaf {
+                            label.push_str(" 🎧");
+                        }
+                        let prefix = "  • ";
+                        let label_width = max_width
+                            .saturating_sub(branch_prefix.width())
+                            .saturating_sub(prefix.width());
+                        ListItem::new(Line::from(vec![
+                            selection_marker(false),
+                            Span::styled(branch_prefix, Style::default().fg(DIM)),
+                            Span::styled(prefix, Style::default().fg(DIM)),
+                            Span::styled(
+                                truncate_display_width_from(&label, horizontal_scroll, label_width),
+                                Style::default().fg(DIM),
+                            ),
+                        ]))
                     }
                 },
                 is_selected,
@@ -414,7 +496,7 @@ pub(super) fn render_channels(frame: &mut Frame, area: Rect, state: &DashboardSt
         list_area,
         state.channel_scroll(),
         list_area.height as usize,
-        state.channel_pane_entries().len(),
+        channel_entry_count,
     );
 }
 

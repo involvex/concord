@@ -1,6 +1,6 @@
 use std::{
-    sync::{Arc, RwLock, atomic::AtomicU64},
-    time::{Duration, Instant},
+    sync::{Arc, RwLock},
+    time::Duration,
 };
 
 use crate::discord::ids::{
@@ -99,7 +99,7 @@ struct GatewayPublishContext<'a> {
     effects_tx: &'a mpsc::Sender<SequencedAppEvent>,
     snapshots_tx: &'a watch::Sender<SnapshotRevision>,
     state: &'a Arc<RwLock<DiscordState>>,
-    revision: &'a Arc<AtomicU64>,
+    revision: &'a Arc<RwLock<SnapshotRevision>>,
     publish_lock: &'a Arc<Mutex<()>>,
 }
 
@@ -159,7 +159,7 @@ pub async fn run_gateway(
     snapshots_tx: watch::Sender<SnapshotRevision>,
     mut commands: mpsc::UnboundedReceiver<GatewayCommand>,
     state: Arc<RwLock<DiscordState>>,
-    revision: Arc<AtomicU64>,
+    revision: Arc<RwLock<SnapshotRevision>>,
     publish_lock: Arc<Mutex<()>>,
 ) {
     let mut session = SessionState::default();
@@ -429,9 +429,7 @@ async fn handle_frame(
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            let started = Instant::now();
             let events = parse_user_account_event(raw);
-            logging::timing("gateway", "dispatch parse", started.elapsed());
             for app_event in events {
                 publish_gateway_event(context.publish, app_event).await;
             }

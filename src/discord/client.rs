@@ -1,7 +1,4 @@
-use std::sync::{
-    Arc, Mutex, RwLock,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::discord::ids::{
     Id,
@@ -33,7 +30,7 @@ pub struct DiscordClient {
     effects_rx: Arc<Mutex<Option<mpsc::Receiver<SequencedAppEvent>>>>,
     snapshots_tx: watch::Sender<SnapshotRevision>,
     state: Arc<RwLock<DiscordState>>,
-    revision: Arc<AtomicU64>,
+    revision: Arc<RwLock<SnapshotRevision>>,
     publish_lock: Arc<AsyncMutex<()>>,
     gateway_commands_tx: mpsc::UnboundedSender<GatewayCommand>,
     gateway_commands_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<GatewayCommand>>>>,
@@ -45,7 +42,7 @@ impl DiscordClient {
         let rest = DiscordRest::new(token.clone());
         let initial_state = DiscordState::default();
         let (effects_tx, effects_rx) = mpsc::channel(4096);
-        let (snapshots_tx, _) = watch::channel(SnapshotRevision { revision: 0 });
+        let (snapshots_tx, _) = watch::channel(SnapshotRevision::default());
         let (gateway_commands_tx, gateway_commands_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
@@ -55,7 +52,7 @@ impl DiscordClient {
             effects_rx: Arc::new(Mutex::new(Some(effects_rx))),
             snapshots_tx,
             state: Arc::new(RwLock::new(initial_state)),
-            revision: Arc::new(AtomicU64::new(0)),
+            revision: Arc::new(RwLock::new(SnapshotRevision::default())),
             publish_lock: Arc::new(AsyncMutex::new(())),
             gateway_commands_tx,
             gateway_commands_rx: Arc::new(Mutex::new(Some(gateway_commands_rx))),
@@ -79,11 +76,11 @@ impl DiscordClient {
             .state
             .read()
             .expect("discord state lock is not poisoned");
-        let revision = self.revision.load(Ordering::Acquire);
-        DiscordSnapshot {
-            revision,
-            state: state.clone(),
-        }
+        let revision = *self
+            .revision
+            .read()
+            .expect("snapshot revision lock is not poisoned");
+        state.snapshot(revision)
     }
 
     pub async fn publish_event(&self, event: AppEvent) {
@@ -356,30 +353,45 @@ pub(super) async fn publish_app_event(
     effects_tx: &mpsc::Sender<SequencedAppEvent>,
     snapshots_tx: &watch::Sender<SnapshotRevision>,
     state: &Arc<RwLock<DiscordState>>,
-    revision: &Arc<AtomicU64>,
+    revision: &Arc<RwLock<SnapshotRevision>>,
     publish_lock: &Arc<AsyncMutex<()>>,
     event: &AppEvent,
 ) {
-    let _publish_guard = publish_lock.lock().await;
-    let revision = if event.mutates_discord_state() {
-        let revision = {
-            let mut state = state.write().expect("discord state lock is not poisoned");
-            state.apply_event(event);
-            revision.fetch_add(1, Ordering::AcqRel) + 1
-        };
-        let _ = snapshots_tx.send(SnapshotRevision { revision });
-        revision
-    } else {
-        revision.load(Ordering::Acquire)
-    };
+    let mutates_state = event.mutates_discord_state();
+    let needs_effect_delivery = event.needs_effect_delivery();
 
-    if event.needs_effect_delivery() {
-        let _ = effects_tx
-            .send(SequencedAppEvent {
-                revision,
-                event: event.clone(),
-            })
-            .await;
+    let event_revision: SnapshotRevision;
+    {
+        let _publish_guard = publish_lock.lock().await;
+
+        event_revision = if mutates_state {
+            let next_revision = {
+                let mut state = state.write().expect("discord state lock is not poisoned");
+                state.apply_event(event);
+                let mut revision = revision
+                    .write()
+                    .expect("snapshot revision lock is not poisoned");
+                if let Some(areas) = DiscordState::snapshot_areas_for_event(event) {
+                    *revision = revision.advance(areas);
+                }
+                *revision
+            };
+            let _ = snapshots_tx.send(next_revision);
+            next_revision
+        } else {
+            *revision
+                .read()
+                .expect("snapshot revision lock is not poisoned")
+        };
+
+        if needs_effect_delivery {
+            let _ = effects_tx
+                .send(SequencedAppEvent {
+                    revision: event_revision.global,
+                    event: event.clone(),
+                })
+                .await;
+        }
     }
 }
 
@@ -391,7 +403,7 @@ pub(crate) fn validate_token_header(token: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::discord::{AppEvent, MessageKind, ids::Id};
+    use crate::discord::{AppEvent, ChannelInfo, MessageKind, ids::Id};
 
     use super::{DiscordClient, validate_token_header};
 
@@ -411,13 +423,17 @@ mod tests {
             .await;
 
         snapshots.changed().await.expect("snapshot is published");
-        let snapshot = snapshots.borrow_and_update().clone();
+        let snapshot = *snapshots.borrow_and_update();
         let effect = effects.recv().await.expect("effect is published");
         let state_snapshot = client.current_discord_snapshot();
 
-        assert_eq!(snapshot.revision, 1);
+        assert_eq!(snapshot.global, 1);
+        assert_eq!(snapshot.message, 1);
+        assert_eq!(snapshot.navigation, 0);
+        assert_eq!(snapshot.detail, 0);
         assert_eq!(effect.revision, 1);
-        assert_eq!(state_snapshot.revision, 1);
+        assert_eq!(state_snapshot.revision.global, 1);
+        assert_eq!(state_snapshot.revision.message, 1);
     }
 
     #[tokio::test]
@@ -430,12 +446,58 @@ mod tests {
         client.publish_event(message_create_event(1)).await;
 
         snapshots.changed().await.expect("snapshot is published");
-        let snapshot = snapshots.borrow_and_update().clone();
+        let snapshot = *snapshots.borrow_and_update();
         let effect = effects.recv().await.expect("effect is published");
 
-        assert_eq!(snapshot.revision, 1);
+        assert_eq!(snapshot.global, 1);
+        assert_eq!(snapshot.navigation, 1);
+        assert_eq!(snapshot.message, 1);
+        assert_eq!(snapshot.detail, 1);
         assert_eq!(effect.revision, 1);
         assert!(matches!(effect.event, AppEvent::MessageCreate { .. }));
+    }
+
+    #[tokio::test]
+    async fn normal_channel_upsert_updates_snapshot_without_effect_delivery() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = DiscordClient::new("test-token".to_owned()).expect("token is valid header");
+        let mut effects = client.take_effects();
+        let mut snapshots = client.subscribe_snapshots();
+
+        client.publish_event(channel_upsert_event()).await;
+
+        snapshots.changed().await.expect("snapshot is published");
+        let snapshot = *snapshots.borrow_and_update();
+
+        assert_eq!(snapshot.global, 1);
+        assert_eq!(snapshot.navigation, 1);
+        assert_eq!(snapshot.message, 1);
+        assert_eq!(snapshot.detail, 1);
+        assert!(matches!(
+            effects.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn thread_channel_upsert_is_delivered_as_effect_for_tui_derived_state() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = DiscordClient::new("test-token".to_owned()).expect("token is valid header");
+        let mut effects = client.take_effects();
+        let mut snapshots = client.subscribe_snapshots();
+
+        client.publish_event(thread_channel_upsert_event()).await;
+
+        snapshots.changed().await.expect("snapshot is published");
+        let snapshot = *snapshots.borrow_and_update();
+        let effect = effects.recv().await.expect("effect is published");
+
+        assert_eq!(snapshot.global, 1);
+        assert_eq!(snapshot.navigation, 1);
+        assert_eq!(snapshot.message, 1);
+        assert_eq!(snapshot.detail, 1);
+        assert_eq!(effect.revision, 1);
+        assert!(matches!(effect.event, AppEvent::ChannelUpsert(_)));
     }
 
     #[tokio::test]
@@ -469,9 +531,10 @@ mod tests {
         }
 
         snapshots.changed().await.expect("snapshot is published");
-        let snapshot = snapshots.borrow_and_update().clone();
-        assert_eq!(snapshot.revision, 32);
-        assert_eq!(client.current_discord_snapshot().revision, 32);
+        let snapshot = *snapshots.borrow_and_update();
+        assert_eq!(snapshot.global, 32);
+        assert_eq!(snapshot.message, 32);
+        assert_eq!(client.current_discord_snapshot().revision.global, 32);
     }
 
     #[tokio::test]
@@ -526,5 +589,43 @@ mod tests {
             embeds: Vec::new(),
             forwarded_snapshots: Vec::new(),
         }
+    }
+
+    fn channel_upsert_event() -> AppEvent {
+        AppEvent::ChannelUpsert(ChannelInfo {
+            guild_id: Some(Id::new(1)),
+            channel_id: Id::new(2),
+            parent_id: Some(Id::new(10)),
+            position: None,
+            last_message_id: None,
+            name: "general".to_owned(),
+            kind: "GuildText".to_owned(),
+            message_count: None,
+            total_message_sent: None,
+            thread_archived: None,
+            thread_locked: None,
+            thread_pinned: None,
+            recipients: None,
+            permission_overwrites: Vec::new(),
+        })
+    }
+
+    fn thread_channel_upsert_event() -> AppEvent {
+        AppEvent::ChannelUpsert(ChannelInfo {
+            guild_id: Some(Id::new(1)),
+            channel_id: Id::new(3),
+            parent_id: Some(Id::new(2)),
+            position: None,
+            last_message_id: None,
+            name: "new-thread".to_owned(),
+            kind: "GuildPublicThread".to_owned(),
+            message_count: None,
+            total_message_sent: None,
+            thread_archived: Some(false),
+            thread_locked: None,
+            thread_pinned: None,
+            recipients: None,
+            permission_overwrites: Vec::new(),
+        })
     }
 }

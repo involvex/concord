@@ -156,6 +156,19 @@ pub struct MemberInfo {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VoiceStateInfo {
+    pub guild_id: Id<GuildMarker>,
+    pub channel_id: Option<Id<ChannelMarker>>,
+    pub user_id: Id<UserMarker>,
+    pub member: Option<MemberInfo>,
+    pub deaf: bool,
+    pub mute: bool,
+    pub self_deaf: bool,
+    pub self_mute: bool,
+    pub self_stream: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleInfo {
     pub id: Id<RoleMarker>,
     pub name: String,
@@ -543,6 +556,12 @@ pub enum AppEvent {
     GuildDelete {
         guild_id: Id<GuildMarker>,
     },
+    SelectedGuildChanged {
+        guild_id: Option<Id<GuildMarker>>,
+    },
+    SelectedMessageChannelChanged {
+        channel_id: Option<Id<ChannelMarker>>,
+    },
     ChannelUpsert(ChannelInfo),
     ChannelDelete {
         guild_id: Option<Id<GuildMarker>>,
@@ -642,6 +661,9 @@ pub enum AppEvent {
         user_id: Id<UserMarker>,
         status: PresenceStatus,
         activities: Vec<ActivityInfo>,
+    },
+    VoiceStateUpdate {
+        state: VoiceStateInfo,
     },
     /// Discord's TYPING_START dispatch: emitted ~10s before the typing
     /// indicator should expire. The dashboard tracks the latest timestamp
@@ -805,29 +827,38 @@ impl AppEvent {
     }
 
     pub fn needs_effect_delivery(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            AppEvent::ChannelUpsert(channel) => channel_upsert_needs_effect_delivery(channel),
             AppEvent::MessageCreate { .. }
-                | AppEvent::MessageHistoryLoaded { .. }
-                | AppEvent::MessageHistoryLoadFailed { .. }
-                | AppEvent::ThreadPreviewLoaded { .. }
-                | AppEvent::ThreadPreviewLoadFailed { .. }
-                | AppEvent::ForumPostsLoaded { .. }
-                | AppEvent::ForumPostsLoadFailed { .. }
-                | AppEvent::PinnedMessagesLoaded { .. }
-                | AppEvent::PinnedMessagesLoadFailed { .. }
-                | AppEvent::ReactionUsersLoaded { .. }
-                | AppEvent::GatewayError { .. }
-                | AppEvent::CurrentUserCapabilities { .. }
-                | AppEvent::AttachmentDownloadCompleted { .. }
-                | AppEvent::UpdateAvailable { .. }
-                | AppEvent::ActivateChannel { .. }
-                | AppEvent::AttachmentPreviewLoaded { .. }
-                | AppEvent::AttachmentPreviewLoadFailed { .. }
-                | AppEvent::UserProfileLoadFailed { .. }
-                | AppEvent::GatewayClosed
-        )
+            | AppEvent::MessageHistoryLoaded { .. }
+            | AppEvent::MessageHistoryLoadFailed { .. }
+            | AppEvent::ThreadPreviewLoaded { .. }
+            | AppEvent::ThreadPreviewLoadFailed { .. }
+            | AppEvent::ForumPostsLoaded { .. }
+            | AppEvent::ForumPostsLoadFailed { .. }
+            | AppEvent::PinnedMessagesLoaded { .. }
+            | AppEvent::PinnedMessagesLoadFailed { .. }
+            | AppEvent::ReactionUsersLoaded { .. }
+            | AppEvent::GatewayError { .. }
+            | AppEvent::CurrentUserCapabilities { .. }
+            | AppEvent::AttachmentDownloadCompleted { .. }
+            | AppEvent::UpdateAvailable { .. }
+            | AppEvent::ActivateChannel { .. }
+            | AppEvent::AttachmentPreviewLoaded { .. }
+            | AppEvent::AttachmentPreviewLoadFailed { .. }
+            | AppEvent::UserProfileLoadFailed { .. }
+            | AppEvent::GatewayClosed => true,
+            _ => false,
+        }
     }
+}
+
+fn channel_upsert_needs_effect_delivery(channel: &ChannelInfo) -> bool {
+    channel.parent_id.is_some()
+        && matches!(
+            channel.kind.as_str(),
+            "thread" | "GuildPublicThread" | "GuildPrivateThread" | "GuildNewsThread"
+        )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]

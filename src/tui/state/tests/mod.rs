@@ -17,14 +17,14 @@ use super::{
     GuildBranch, GuildPaneEntry, MessageActionKind, MessageState,
 };
 use crate::discord::{
-    ActivityInfo, ActivityKind, AppCommand, AppEvent, AttachmentInfo, ChannelInfo,
-    ChannelNotificationOverrideInfo, ChannelRecipientInfo, ChannelUnreadState,
+    ActivityInfo, ActivityKind, AppCommand, AppEvent, AttachmentInfo, AttachmentUpdate,
+    ChannelInfo, ChannelNotificationOverrideInfo, ChannelRecipientInfo, ChannelUnreadState,
     ChannelVisibilityStats, CustomEmojiInfo, DiscordState, DownloadAttachmentSource,
     ForumPostArchiveState, FriendStatus, GuildNotificationSettingsInfo, MemberInfo,
     MessageAttachmentUpload, MessageInfo, MessageKind, MessageReferenceInfo, MessageSnapshotInfo,
     MutualGuildInfo, NotificationLevel, PermissionOverwriteInfo, PermissionOverwriteKind,
     PresenceStatus, ReactionEmoji, ReactionInfo, ReactionUserInfo, ReactionUsersInfo,
-    ReadStateInfo, ReplyInfo, RoleInfo, UserProfileInfo,
+    ReadStateInfo, ReplyInfo, RoleInfo, SnapshotRevision, UserProfileInfo, VoiceStateInfo,
 };
 
 fn message_rendered_height(
@@ -1376,6 +1376,54 @@ fn message_scroll_preserves_position_when_not_following() {
     // Cursor moved up but the viewport still showed the latest, so the new
     // event engaged auto-scroll (without moving the cursor).
     assert!(state.message_auto_follow());
+
+    let mut state = state_with_messages(5);
+    state.focus_pane(FocusPane::Messages);
+    state.set_message_view_height(2);
+    state.move_up();
+    state.move_up();
+    assert!(!state.message_auto_follow());
+
+    let selected_message_id = state.messages()[state.selected_message()].id;
+    let selected_message = state.selected_message();
+    let message_scroll = state.message_scroll();
+    let previous_revision = SnapshotRevision {
+        global: 1,
+        navigation: 1,
+        message: 1,
+        detail: 1,
+    };
+    let mut updated_discord = state.discord.clone();
+    updated_discord.apply_event(&AppEvent::MessageHistoryLoaded {
+        channel_id: Id::new(2),
+        before: None,
+        messages: vec![MessageInfo {
+            content: Some("new message".to_owned()),
+            ..message_info(Id::new(2), 6)
+        }],
+    });
+    let snapshot = updated_discord.snapshot(SnapshotRevision {
+        global: 2,
+        navigation: 1,
+        message: 2,
+        detail: 1,
+    });
+
+    state.restore_discord_snapshot_areas(&snapshot, previous_revision);
+
+    assert_eq!(
+        state.messages()[state.selected_message()].id,
+        selected_message_id
+    );
+    assert_eq!(state.selected_message(), selected_message);
+    assert_eq!(state.message_scroll(), message_scroll);
+    assert!(!state.message_auto_follow());
+    assert!(
+        state
+            .messages()
+            .iter()
+            .any(|message| message.content.as_deref() == Some("new message"))
+    );
 }
 
 #[test]
@@ -1548,6 +1596,138 @@ fn wrapped_content_increases_message_rendered_height() {
     };
 
     assert_eq!(message_rendered_height(&message, 5, 16, 3), 5);
+}
+
+#[test]
+fn message_row_content_metrics_cache_reuses_width_specific_rows() {
+    let state = state_with_single_message_content("abcdefghijkl");
+    let message = state.messages()[0];
+
+    assert_eq!(state.message_row_content_metrics_cache_len(), 0);
+    let first = state.message_row_metrics_at_with_selected_bottom(0, message, 5, 16, 3, true);
+    let second = state.message_row_metrics_at_with_selected_bottom(0, message, 5, 16, 3, true);
+
+    assert_eq!(first, second);
+    assert_eq!(state.message_row_content_metrics_cache_len(), 1);
+
+    let _ = state.message_row_metrics_at_with_selected_bottom(0, message, 4, 16, 3, true);
+
+    assert_eq!(state.message_row_content_metrics_cache_len(), 2);
+}
+
+#[test]
+fn message_row_content_metrics_cache_clears_on_display_option_toggle() {
+    let mut state = state_with_single_message_content("<:party:1234>");
+    let message = state.messages()[0];
+
+    let _ = state.message_row_metrics_at_with_selected_bottom(0, message, 5, 16, 3, true);
+    assert_eq!(state.message_row_content_metrics_cache_len(), 1);
+
+    state.open_options_popup();
+    for _ in 0..4 {
+        state.move_option_down();
+    }
+    state.toggle_selected_display_option();
+
+    assert_eq!(state.message_row_content_metrics_cache_len(), 0);
+}
+
+#[test]
+fn message_row_content_metrics_cache_clears_on_discord_event() {
+    let mut state = state_with_single_message_content("abcdefghijkl");
+    let message = state.messages()[0];
+
+    let _ = state.message_row_metrics_at_with_selected_bottom(0, message, 5, 16, 3, true);
+    assert_eq!(state.message_row_content_metrics_cache_len(), 1);
+
+    state.push_event(AppEvent::MessageUpdate {
+        guild_id: Some(Id::new(1)),
+        channel_id: Id::new(2),
+        message_id: Id::new(1),
+        poll: None,
+        content: Some("updated".to_owned()),
+        sticker_names: None,
+        mentions: None,
+        attachments: AttachmentUpdate::Unchanged,
+        embeds: None,
+        edited_timestamp: Some("2026-01-01T00:00:00Z".to_owned()),
+    });
+
+    assert_eq!(state.message_row_content_metrics_cache_len(), 0);
+
+    let message = state.messages()[0];
+    let _ = state.message_row_metrics_at_with_selected_bottom(0, message, 5, 16, 3, true);
+    assert_eq!(state.message_row_content_metrics_cache_len(), 1);
+
+    state.push_event(AppEvent::UserProfileLoaded {
+        guild_id: Some(Id::new(1)),
+        profile: profile_info(99, Some("profile nickname")),
+    });
+
+    assert_eq!(state.message_row_content_metrics_cache_len(), 0);
+
+    let message = state.messages()[0];
+    let _ = state.message_row_metrics_at_with_selected_bottom(0, message, 5, 16, 3, true);
+    assert_eq!(state.message_row_content_metrics_cache_len(), 1);
+
+    state.push_event(AppEvent::VoiceStateUpdate {
+        state: VoiceStateInfo {
+            guild_id: Id::new(1),
+            channel_id: None,
+            user_id: Id::new(99),
+            member: Some(MemberInfo {
+                user_id: Id::new(99),
+                display_name: "voice nickname".to_owned(),
+                username: Some("voice-user".to_owned()),
+                is_bot: false,
+                avatar_url: None,
+                role_ids: Vec::new(),
+            }),
+            deaf: false,
+            mute: false,
+            self_deaf: false,
+            self_mute: false,
+            self_stream: false,
+        },
+    });
+
+    assert_eq!(state.message_row_content_metrics_cache_len(), 0);
+}
+
+#[test]
+fn message_row_content_metrics_cache_survives_noisy_discord_events() {
+    let mut state = state_with_single_message_content("abcdefghijkl");
+    let message = state.messages()[0];
+
+    let _ = state.message_row_metrics_at_with_selected_bottom(0, message, 5, 16, 3, true);
+    assert_eq!(state.message_row_content_metrics_cache_len(), 1);
+
+    state.push_event(AppEvent::TypingStart {
+        channel_id: Id::new(2),
+        user_id: Id::new(99),
+    });
+    state.push_event(AppEvent::PresenceUpdate {
+        guild_id: Id::new(1),
+        user_id: Id::new(99),
+        status: PresenceStatus::Online,
+        activities: Vec::new(),
+    });
+    state.push_event(AppEvent::MessageAck {
+        channel_id: Id::new(2),
+        message_id: Id::new(1),
+        mention_count: 0,
+    });
+    state.push_event(AppEvent::RelationshipUpsert {
+        relationship: crate::discord::RelationshipInfo {
+            user_id: Id::new(99),
+            status: FriendStatus::Friend,
+            nickname: None,
+            display_name: Some("neo".to_owned()),
+            username: Some("neo".to_owned()),
+        },
+    });
+
+    assert_eq!(state.message_row_content_metrics_cache_len(), 1);
 }
 
 #[test]
@@ -3105,6 +3285,34 @@ fn existing_reaction_can_be_added_without_add_reactions_permission() {
 }
 
 #[test]
+fn reaction_picker_prioritizes_existing_reactions_and_qwerty_shortcuts() {
+    let mut state = state_with_reaction_message();
+
+    state.open_emoji_reaction_picker();
+
+    let items = state.filtered_emoji_reaction_items();
+    assert_eq!(items[0].emoji, ReactionEmoji::Unicode("👍".to_owned()));
+    assert_eq!(
+        items[1].emoji,
+        ReactionEmoji::Custom {
+            id: Id::new(50),
+            name: Some("party".to_owned()),
+            animated: false,
+        }
+    );
+
+    let command = state.activate_emoji_reaction_shortcut('q');
+    assert_eq!(
+        command,
+        Some(AppCommand::RemoveReaction {
+            channel_id: Id::new(2),
+            message_id: Id::new(1),
+            emoji: ReactionEmoji::Unicode("👍".to_owned()),
+        })
+    );
+}
+
+#[test]
 fn show_reacted_users_requires_read_message_history() {
     let reactions = vec![ReactionInfo {
         emoji: ReactionEmoji::Unicode("👍".to_owned()),
@@ -3450,6 +3658,53 @@ fn missing_thread_preview_requests_exact_latest_message_until_loaded() {
             .latest_message_preview
             .map(|preview| (preview.author, preview.content)),
         Some(("neo".to_owned(), "latest reply".to_owned()))
+    );
+}
+
+#[test]
+fn missing_thread_preview_requests_include_visible_forum_posts_with_unavailable_content() {
+    let mut state = state_with_forum_channel_posts();
+    state.push_event(AppEvent::SelectedMessageChannelChanged { channel_id: None });
+    state.push_event(AppEvent::ChannelUpsert(forum_thread_info(
+        Id::new(1),
+        Id::new(20),
+        30,
+        "welcome",
+        Some(300),
+        false,
+    )));
+    state.push_event(AppEvent::MessageCreate {
+        guild_id: Some(Id::new(1)),
+        channel_id: Id::new(30),
+        message_id: Id::new(300),
+        author_id: Id::new(99),
+        author: "neo".to_owned(),
+        author_avatar_url: None,
+        author_role_ids: Vec::new(),
+        message_kind: MessageKind::regular(),
+        reference: None,
+        reply: None,
+        poll: None,
+        content: Some("starter preview".to_owned()),
+        sticker_names: Vec::new(),
+        mentions: Vec::new(),
+        attachments: Vec::new(),
+        embeds: Vec::new(),
+        forwarded_snapshots: Vec::new(),
+    });
+
+    let post = state
+        .selected_forum_post_items()
+        .into_iter()
+        .find(|post| post.channel_id == Id::new(30))
+        .expect("forum post should be visible");
+    assert_eq!(
+        post.preview_content.as_deref(),
+        Some("<message content unavailable>")
+    );
+    assert_eq!(
+        state.missing_thread_preview_load_requests(),
+        vec![(Id::new(30), Id::new(300))]
     );
 }
 
@@ -4548,7 +4803,9 @@ fn channel_pane_excludes_threads() {
         .iter()
         .filter_map(|entry| match entry {
             ChannelPaneEntry::Channel { state, .. } => Some(state.id),
-            ChannelPaneEntry::CategoryHeader { .. } => None,
+            ChannelPaneEntry::CategoryHeader { .. } | ChannelPaneEntry::VoiceParticipant { .. } => {
+                None
+            }
         })
         .collect();
     assert!(channel_ids.contains(&Id::new(2)));
@@ -5683,6 +5940,404 @@ fn forum_pinned_posts_float_to_top_preserving_relative_order() {
 }
 
 #[test]
+fn forum_channel_upsert_inserts_new_thread_at_top_of_active_list() {
+    let guild_id = Id::new(1);
+    let forum_id = Id::new(20);
+    let mut state = DashboardState::new();
+
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![forum_channel_info(guild_id, forum_id)],
+        members: Vec::new(),
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.confirm_selected_guild();
+    state.confirm_selected_channel();
+
+    state.push_event(AppEvent::ForumPostsLoaded {
+        channel_id: forum_id,
+        archive_state: ForumPostArchiveState::Active,
+        offset: 0,
+        next_offset: 1,
+        posts: vec![forum_thread_info(
+            guild_id, forum_id, 30, "welcome", None, false,
+        )],
+        preview_messages: Vec::new(),
+        has_more: false,
+    });
+
+    state.push_event(AppEvent::ChannelUpsert(forum_thread_info(
+        guild_id,
+        forum_id,
+        31,
+        "brand-new",
+        None,
+        false,
+    )));
+
+    assert_eq!(
+        state
+            .selected_forum_post_items()
+            .iter()
+            .map(|post| post.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["brand-new", "welcome"]
+    );
+
+    // Re-emitting the same thread (e.g. via THREAD_LIST_SYNC) must not duplicate.
+    state.push_event(AppEvent::ChannelUpsert(forum_thread_info(
+        guild_id,
+        forum_id,
+        31,
+        "brand-new",
+        None,
+        false,
+    )));
+    assert_eq!(state.selected_forum_post_items().len(), 2);
+}
+
+#[test]
+fn forum_channel_upsert_effect_inserts_new_thread_after_snapshot_restore() {
+    let guild_id = Id::new(1);
+    let forum_id = Id::new(20);
+    let welcome_thread = forum_thread_info(guild_id, forum_id, 30, "welcome", None, false);
+    let new_thread = forum_thread_info(guild_id, forum_id, 31, "brand-new", None, false);
+    let mut state = DashboardState::new();
+
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![forum_channel_info(guild_id, forum_id)],
+        members: Vec::new(),
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.confirm_selected_guild();
+    state.confirm_selected_channel();
+    state.push_event(AppEvent::ForumPostsLoaded {
+        channel_id: forum_id,
+        archive_state: ForumPostArchiveState::Active,
+        offset: 0,
+        next_offset: 1,
+        posts: vec![welcome_thread.clone()],
+        preview_messages: Vec::new(),
+        has_more: false,
+    });
+
+    let mut snapshot_state = DiscordState::default();
+    snapshot_state.apply_event(&AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![
+            forum_channel_info(guild_id, forum_id),
+            welcome_thread,
+            new_thread.clone(),
+        ],
+        members: Vec::new(),
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.restore_discord_snapshot(snapshot_state);
+    state.push_effect(AppEvent::ChannelUpsert(new_thread.clone()));
+
+    assert_eq!(
+        state
+            .selected_forum_post_items()
+            .iter()
+            .map(|post| post.label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["brand-new", "welcome"]
+    );
+
+    state.push_effect(AppEvent::ChannelUpsert(new_thread));
+    assert_eq!(state.selected_forum_post_items().len(), 2);
+}
+
+#[test]
+fn forum_sidebar_unread_aggregates_unread_child_posts() {
+    let guild_id = Id::new(1);
+    let forum_id = Id::new(20);
+    let thread_id = Id::new(31);
+    let mut state = DashboardState::new();
+
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![
+            forum_channel_info(guild_id, forum_id),
+            forum_thread_info(
+                guild_id,
+                forum_id,
+                thread_id.get(),
+                "new post",
+                Some(300),
+                false,
+            ),
+        ],
+        members: Vec::new(),
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.push_event(AppEvent::ReadStateInit {
+        entries: vec![ReadStateInfo {
+            channel_id: thread_id,
+            last_acked_message_id: Some(Id::new(299)),
+            mention_count: 0,
+        }],
+    });
+
+    assert_eq!(
+        state.sidebar_channel_unread(forum_id),
+        ChannelUnreadState::Unread
+    );
+}
+
+#[test]
+fn forum_sidebar_unread_aggregates_child_notification_count() {
+    let guild_id = Id::new(1);
+    let forum_id = Id::new(20);
+    let thread_id = Id::new(31);
+    let mut state = DashboardState::new();
+
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![
+            forum_channel_info(guild_id, forum_id),
+            forum_thread_info(
+                guild_id,
+                forum_id,
+                thread_id.get(),
+                "new post",
+                Some(299),
+                false,
+            ),
+        ],
+        members: Vec::new(),
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.push_event(AppEvent::UserGuildNotificationSettingsInit {
+        settings: vec![GuildNotificationSettingsInfo {
+            guild_id: Some(guild_id),
+            message_notifications: Some(NotificationLevel::AllMessages),
+            muted: false,
+            mute_end_time: None,
+            suppress_everyone: false,
+            suppress_roles: false,
+            channel_overrides: Vec::new(),
+        }],
+    });
+    state.push_event(AppEvent::ReadStateInit {
+        entries: vec![ReadStateInfo {
+            channel_id: thread_id,
+            last_acked_message_id: Some(Id::new(299)),
+            mention_count: 0,
+        }],
+    });
+    state.push_event(AppEvent::MessageCreate {
+        guild_id: Some(guild_id),
+        channel_id: thread_id,
+        message_id: Id::new(300),
+        author_id: Id::new(99),
+        author: "neo".to_owned(),
+        author_avatar_url: None,
+        author_role_ids: Vec::new(),
+        message_kind: MessageKind::regular(),
+        reference: None,
+        reply: None,
+        poll: None,
+        content: Some("new post body".to_owned()),
+        sticker_names: Vec::new(),
+        mentions: Vec::new(),
+        attachments: Vec::new(),
+        embeds: Vec::new(),
+        forwarded_snapshots: Vec::new(),
+    });
+
+    assert_eq!(
+        state.sidebar_channel_unread(forum_id),
+        ChannelUnreadState::Notified(1)
+    );
+    assert_eq!(
+        state.sidebar_guild_unread(guild_id),
+        ChannelUnreadState::Notified(1)
+    );
+}
+
+#[test]
+fn opening_forum_channel_marks_unread_child_posts_as_read() {
+    let guild_id = Id::new(1);
+    let forum_id = Id::new(20);
+    let thread_id = Id::new(31);
+    let mut state = DashboardState::new();
+    let mut forum = forum_channel_info(guild_id, forum_id);
+    forum.last_message_id = Some(Id::new(200));
+
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![
+            forum,
+            forum_thread_info(
+                guild_id,
+                forum_id,
+                thread_id.get(),
+                "new post",
+                Some(300),
+                false,
+            ),
+        ],
+        members: Vec::new(),
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.push_event(AppEvent::ReadStateInit {
+        entries: vec![
+            ReadStateInfo {
+                channel_id: forum_id,
+                last_acked_message_id: Some(Id::new(199)),
+                mention_count: 0,
+            },
+            ReadStateInfo {
+                channel_id: thread_id,
+                last_acked_message_id: Some(Id::new(299)),
+                mention_count: 0,
+            },
+        ],
+    });
+    state.confirm_selected_guild();
+
+    assert_eq!(
+        state.sidebar_channel_unread(forum_id),
+        ChannelUnreadState::Unread
+    );
+    state.confirm_selected_channel();
+
+    assert_eq!(
+        state.sidebar_channel_unread(forum_id),
+        ChannelUnreadState::Seen
+    );
+    assert_eq!(
+        state.drain_pending_commands(),
+        vec![AppCommand::AckChannels {
+            targets: vec![(forum_id, Id::new(200)), (thread_id, Id::new(300))]
+        }]
+    );
+}
+
+#[test]
+fn hidden_forum_child_posts_are_not_listed_or_acked() {
+    let guild_id = Id::new(1);
+    let forum_id = Id::new(20);
+    let public_thread_id = Id::new(31);
+    let private_thread_id = Id::new(32);
+    let mut private_thread = forum_thread_info(
+        guild_id,
+        forum_id,
+        private_thread_id.get(),
+        "private post",
+        Some(400),
+        false,
+    );
+    private_thread.kind = "GuildPrivateThread".to_owned();
+    let mut state = DashboardState::new();
+
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![
+            forum_channel_info(guild_id, forum_id),
+            forum_thread_info(
+                guild_id,
+                forum_id,
+                public_thread_id.get(),
+                "public post",
+                Some(300),
+                false,
+            ),
+            private_thread.clone(),
+        ],
+        members: Vec::new(),
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.push_event(AppEvent::ForumPostsLoaded {
+        channel_id: forum_id,
+        archive_state: ForumPostArchiveState::Active,
+        offset: 0,
+        next_offset: 2,
+        posts: vec![
+            forum_thread_info(
+                guild_id,
+                forum_id,
+                public_thread_id.get(),
+                "public post",
+                Some(300),
+                false,
+            ),
+            private_thread,
+        ],
+        preview_messages: Vec::new(),
+        has_more: false,
+    });
+    state.push_event(AppEvent::ReadStateInit {
+        entries: vec![
+            ReadStateInfo {
+                channel_id: public_thread_id,
+                last_acked_message_id: Some(Id::new(299)),
+                mention_count: 0,
+            },
+            ReadStateInfo {
+                channel_id: private_thread_id,
+                last_acked_message_id: Some(Id::new(399)),
+                mention_count: 0,
+            },
+        ],
+    });
+    state.confirm_selected_guild();
+    state.confirm_selected_channel();
+
+    assert_eq!(
+        state
+            .selected_forum_post_items()
+            .iter()
+            .map(|post| post.channel_id)
+            .collect::<Vec<_>>(),
+        vec![public_thread_id]
+    );
+    assert_eq!(
+        state.drain_pending_commands(),
+        vec![AppCommand::AckChannels {
+            targets: vec![(public_thread_id, Id::new(300))]
+        }]
+    );
+}
+
+#[test]
 fn activating_selected_forum_post_opens_thread_channel() {
     let mut state = state_with_forum_channel_posts();
     state.focus_pane(FocusPane::Messages);
@@ -6622,7 +7277,7 @@ fn viewport_scroll_does_not_move_list_pane_selection() {
     channel_state.scroll_focused_pane_viewport_down();
     assert_eq!(channel_state.selected_channel(), selected_channel);
     assert_eq!(channel_state.channel_scroll(), channel_scroll + 1);
-    assert_eq!(channel_state.focused_channel_selection(), None);
+    assert!(channel_state.selected_channel() < channel_state.channel_scroll());
 
     let mut member_state = state_with_members(8);
     member_state.focus_pane(FocusPane::Members);
@@ -7339,26 +7994,61 @@ fn channel_tree_groups_category_children() {
     let entries = state.channel_pane_entries();
 
     assert!(matches!(
-        entries[0],
+        &entries[0],
         ChannelPaneEntry::CategoryHeader {
             collapsed: false,
             ..
         }
     ));
     assert!(matches!(
-        entries[1],
+        &entries[1],
         ChannelPaneEntry::Channel {
             branch: ChannelBranch::Middle,
             ..
         }
     ));
     assert!(matches!(
-        entries[2],
+        &entries[2],
         ChannelPaneEntry::Channel {
             branch: ChannelBranch::Last,
             ..
         }
     ));
+}
+
+#[test]
+fn voice_channel_participants_render_as_child_rows_and_are_skipped_by_selection() {
+    let mut state = state_with_voice_channel_participant();
+    state.focus_pane(FocusPane::Channels);
+    state.set_channel_view_height(10);
+    let entries = state.channel_pane_entries();
+
+    assert!(matches!(
+        &entries[1],
+        ChannelPaneEntry::Channel {
+            branch: ChannelBranch::Middle,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &entries[2],
+        ChannelPaneEntry::VoiceParticipant { participant, .. }
+            if participant.display_name == "Alice"
+    ));
+    assert!(matches!(
+        &entries[3],
+        ChannelPaneEntry::Channel {
+            branch: ChannelBranch::Last,
+            ..
+        }
+    ));
+
+    state.move_down();
+    assert_eq!(state.selected_channel, 1);
+    assert!(!state.select_visible_pane_row(FocusPane::Channels, 2));
+    assert_eq!(state.selected_channel, 1);
+    state.move_down();
+    assert_eq!(state.selected_channel, 3);
 }
 
 #[test]
@@ -7372,7 +8062,7 @@ fn selected_channel_category_can_be_closed_and_opened() {
     let closed_entries = state.channel_pane_entries();
     assert_eq!(closed_entries.len(), 1);
     assert!(matches!(
-        closed_entries[0],
+        &closed_entries[0],
         ChannelPaneEntry::CategoryHeader {
             collapsed: true,
             ..
@@ -7392,7 +8082,7 @@ fn selected_channel_child_can_close_parent_category() {
     let entries = state.channel_pane_entries();
     assert_eq!(entries.len(), 1);
     assert!(matches!(
-        entries[0],
+        &entries[0],
         ChannelPaneEntry::CategoryHeader {
             collapsed: true,
             ..
@@ -7589,7 +8279,101 @@ fn channel_entry_names(state: &DashboardState) -> Vec<&str> {
         .into_iter()
         .filter_map(|entry| match entry {
             ChannelPaneEntry::Channel { state, .. } => Some(state.name.as_str()),
-            ChannelPaneEntry::CategoryHeader { .. } => None,
+            ChannelPaneEntry::CategoryHeader { .. } | ChannelPaneEntry::VoiceParticipant { .. } => {
+                None
+            }
         })
         .collect()
+}
+
+fn state_with_voice_channel_participant() -> DashboardState {
+    let guild_id = Id::new(1);
+    let category_id = Id::new(10);
+    let voice_id = Id::new(11);
+    let text_id = Id::new(12);
+    let alice = Id::new(20);
+    let mut state = DashboardState::new();
+
+    state.push_event(AppEvent::GuildCreate {
+        guild_id,
+        name: "guild".to_owned(),
+        member_count: None,
+        channels: vec![
+            ChannelInfo {
+                guild_id: Some(guild_id),
+                channel_id: category_id,
+                parent_id: None,
+                position: Some(0),
+                last_message_id: None,
+                name: "Channels".to_owned(),
+                kind: "category".to_owned(),
+                message_count: None,
+                total_message_sent: None,
+                thread_archived: None,
+                thread_locked: None,
+                thread_pinned: None,
+                recipients: None,
+                permission_overwrites: Vec::new(),
+            },
+            ChannelInfo {
+                guild_id: Some(guild_id),
+                channel_id: voice_id,
+                parent_id: Some(category_id),
+                position: Some(0),
+                last_message_id: None,
+                name: "Lobby".to_owned(),
+                kind: "GuildVoice".to_owned(),
+                message_count: None,
+                total_message_sent: None,
+                thread_archived: None,
+                thread_locked: None,
+                thread_pinned: None,
+                recipients: None,
+                permission_overwrites: Vec::new(),
+            },
+            ChannelInfo {
+                guild_id: Some(guild_id),
+                channel_id: text_id,
+                parent_id: Some(category_id),
+                position: Some(1),
+                last_message_id: None,
+                name: "general".to_owned(),
+                kind: "text".to_owned(),
+                message_count: None,
+                total_message_sent: None,
+                thread_archived: None,
+                thread_locked: None,
+                thread_pinned: None,
+                recipients: None,
+                permission_overwrites: Vec::new(),
+            },
+        ],
+        members: vec![MemberInfo {
+            user_id: alice,
+            display_name: "Alice".to_owned(),
+            username: Some("alice".to_owned()),
+            is_bot: false,
+            avatar_url: None,
+            role_ids: Vec::new(),
+        }],
+        presences: Vec::new(),
+        roles: Vec::new(),
+        emojis: Vec::new(),
+        owner_id: None,
+    });
+    state.push_event(AppEvent::VoiceStateUpdate {
+        state: VoiceStateInfo {
+            guild_id,
+            channel_id: Some(voice_id),
+            user_id: alice,
+            member: None,
+            deaf: false,
+            mute: false,
+            self_deaf: false,
+            self_mute: false,
+            self_stream: false,
+        },
+    });
+    state.confirm_selected_guild();
+    state
 }

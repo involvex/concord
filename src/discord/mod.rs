@@ -1,6 +1,7 @@
 mod auth_http;
 mod client;
 mod commands;
+mod display_name;
 mod events;
 mod fingerprint;
 mod gateway;
@@ -25,12 +26,12 @@ pub use events::{
     MessageSnapshotInfo, MutualGuildInfo, NotificationLevel, PermissionOverwriteInfo,
     PermissionOverwriteKind, PollAnswerInfo, PollInfo, PresenceStatus, ReactionInfo,
     ReactionUserInfo, ReactionUsersInfo, ReadStateInfo, RelationshipInfo, ReplyInfo, RoleInfo,
-    SequencedAppEvent, UserProfileInfo,
+    SequencedAppEvent, UserProfileInfo, VoiceStateInfo,
 };
 pub use ids::{Id, marker};
 pub use rest::ForumPostPage;
 pub use state::{
     ChannelRecipientState, ChannelState, ChannelUnreadState, ChannelVisibilityStats,
     DiscordSnapshot, DiscordState, GuildMemberState, GuildState, MessageCapabilities, MessageState,
-    RoleState, SnapshotRevision,
+    RoleState, SnapshotAreas, SnapshotRevision, VoiceParticipantState,
 };

@@ -1,10 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use crate::discord::ids::{
     Id,
     marker::{ChannelMarker, GuildMarker, UserMarker},
 };
-use crate::discord::{AppCommand, AppEvent, ChannelState};
+use crate::discord::{AppCommand, AppEvent, ChannelState, VoiceParticipantState};
 
 use super::{
     ActiveGuildScope, DashboardState, PaneFilterState, PendingReadAck, READ_ACK_DEBOUNCE,
@@ -106,7 +106,8 @@ impl DashboardState {
         let active_channel_has_unread_snapshot = self.active_channel_id == Some(channel_id)
             && (self.unread_divider_last_acked_id.is_some() || self.pending_unread_anchor_scroll);
         let mark_as_read_enabled = active_channel_has_unread_snapshot
-            || self.discord.channel_ack_target(channel_id).is_some();
+            || self.discord.channel_ack_target(channel_id).is_some()
+            || (channel.is_forum() && !self.discord.forum_child_ack_targets(channel_id).is_empty());
         vec![
             ChannelActionItem {
                 kind: ChannelActionKind::LoadPinnedMessages,
@@ -278,6 +279,11 @@ impl DashboardState {
         (!self.selected_channel_is_forum()).then_some(self.selected_channel_id()?)
     }
 
+    pub fn selected_message_history_needs_reload(&self) -> bool {
+        self.selected_message_history_channel_id()
+            .is_some_and(|channel_id| self.discord.channel_message_bodies_are_cold(channel_id))
+    }
+
     pub fn selected_forum_channel(&self) -> Option<(Id<GuildMarker>, Id<ChannelMarker>)> {
         let channel = self
             .selected_channel_state()
@@ -347,7 +353,11 @@ impl DashboardState {
         let (mut pinned, mut rest): (Vec<_>, Vec<_>) = post_ids
             .iter()
             .filter_map(|post_id| self.discord.channel(*post_id))
-            .filter(|post| post.is_thread() && post.parent_id == Some(forum_channel_id))
+            .filter(|post| {
+                post.is_thread()
+                    && post.parent_id == Some(forum_channel_id)
+                    && self.discord.can_view_channel(post)
+            })
             .partition(|post| post.thread_pinned.unwrap_or(false));
         let by_last_message = |post: &&ChannelState| {
             std::cmp::Reverse(post.last_message_id.map(|id| id.get()).unwrap_or(0))
@@ -617,6 +627,13 @@ impl DashboardState {
                 .collect();
         }
 
+        let voice_participants_by_channel = match self.active_guild {
+            ActiveGuildScope::Guild(guild_id) => self
+                .discord
+                .voice_participants_by_channel_for_guild(guild_id),
+            ActiveGuildScope::Unset | ActiveGuildScope::DirectMessages => BTreeMap::new(),
+        };
+
         let category_ids: HashSet<Id<ChannelMarker>> = channels
             .iter()
             .filter(|channel| channel.is_category())
@@ -638,10 +655,12 @@ impl DashboardState {
         let mut entries = Vec::new();
         for root in roots {
             if !root.is_category() {
-                entries.push(ChannelPaneEntry::Channel {
-                    state: root,
-                    branch: ChannelBranch::None,
-                });
+                self.push_channel_pane_channel_entry(
+                    &mut entries,
+                    root,
+                    ChannelBranch::None,
+                    &voice_participants_by_channel,
+                );
                 continue;
             }
 
@@ -667,14 +686,38 @@ impl DashboardState {
                 } else {
                     ChannelBranch::Middle
                 };
-                entries.push(ChannelPaneEntry::Channel {
-                    state: child,
+                self.push_channel_pane_channel_entry(
+                    &mut entries,
+                    child,
                     branch,
-                });
+                    &voice_participants_by_channel,
+                );
             }
         }
 
         entries
+    }
+
+    fn push_channel_pane_channel_entry<'a>(
+        &'a self,
+        entries: &mut Vec<ChannelPaneEntry<'a>>,
+        state: &'a ChannelState,
+        branch: ChannelBranch,
+        voice_participants_by_channel: &BTreeMap<Id<ChannelMarker>, Vec<VoiceParticipantState>>,
+    ) {
+        entries.push(ChannelPaneEntry::Channel { state, branch });
+        if !state.is_voice() {
+            return;
+        }
+        let Some(participants) = voice_participants_by_channel.get(&state.id) else {
+            return;
+        };
+        entries.extend(participants.iter().cloned().map(|participant| {
+            ChannelPaneEntry::VoiceParticipant {
+                participant,
+                parent_branch: branch,
+            }
+        }));
     }
 
     /// Returns channel pane entries filtered by the active pane filter query,
@@ -784,16 +827,74 @@ impl DashboardState {
     }
 
     pub fn selected_channel(&self) -> usize {
-        clamp_selected_index(
-            self.selected_channel,
-            self.channel_pane_filtered_entries().len(),
-        )
+        let entries = self.channel_pane_filtered_entries();
+        self.selected_channel_from_entries(&entries)
+    }
+
+    pub(in crate::tui) fn selected_channel_from_entries(
+        &self,
+        entries: &[ChannelPaneEntry<'_>],
+    ) -> usize {
+        selectable_channel_index_near(entries, self.selected_channel, false).unwrap_or(0)
+    }
+
+    pub(super) fn move_channel_selection_down(&mut self) {
+        let selected = self.selected_channel();
+        self.select_channel_entry_near(selected.saturating_add(1), true);
+        self.channel_keep_selection_visible = true;
+        self.clamp_channel_viewport();
+    }
+
+    pub(super) fn move_channel_selection_up(&mut self) {
+        let selected = self.selected_channel();
+        self.select_channel_entry_near(selected.saturating_sub(1), false);
+        self.channel_keep_selection_visible = true;
+        self.clamp_channel_viewport();
+    }
+
+    pub(super) fn move_channel_selection_down_by(&mut self, distance: usize) {
+        let selected = self.selected_channel();
+        self.select_channel_entry_near(selected.saturating_add(distance), true);
+        self.channel_keep_selection_visible = true;
+        self.clamp_channel_viewport();
+    }
+
+    pub(super) fn move_channel_selection_up_by(&mut self, distance: usize) {
+        let selected = self.selected_channel();
+        self.select_channel_entry_near(selected.saturating_sub(distance), false);
+        self.channel_keep_selection_visible = true;
+        self.clamp_channel_viewport();
+    }
+
+    pub(super) fn jump_channel_selection_top(&mut self) {
+        self.select_channel_entry_near(0, true);
+        self.channel_keep_selection_visible = true;
+        self.clamp_channel_viewport();
+    }
+
+    pub(super) fn jump_channel_selection_bottom(&mut self) {
+        let entries = self.channel_pane_filtered_entries();
+        self.selected_channel = entries
+            .iter()
+            .rposition(ChannelPaneEntry::is_selectable)
+            .unwrap_or(0);
+        self.channel_keep_selection_visible = true;
+        self.clamp_channel_viewport();
+    }
+
+    fn select_channel_entry_near(&mut self, index: usize, prefer_forward: bool) {
+        let entries = self.channel_pane_filtered_entries();
+        self.selected_channel =
+            selectable_channel_index_near(&entries, index, prefer_forward).unwrap_or(0);
     }
 
     pub(super) fn selected_channel_cursor_id(&self) -> Option<Id<ChannelMarker>> {
         match self.channel_pane_entries().get(self.selected_channel()) {
             Some(ChannelPaneEntry::Channel { state, .. }) => Some(state.id),
-            Some(ChannelPaneEntry::CategoryHeader { .. }) | None => None,
+            Some(
+                ChannelPaneEntry::CategoryHeader { .. } | ChannelPaneEntry::VoiceParticipant { .. },
+            )
+            | None => None,
         }
     }
 
@@ -807,20 +908,6 @@ impl DashboardState {
             .skip(self.channel_scroll)
             .take(pane_content_height(self.channel_view_height))
             .collect()
-    }
-
-    pub fn focused_channel_selection(&self) -> Option<usize> {
-        if self.focus == FocusPane::Channels && !self.channel_pane_filtered_entries().is_empty() {
-            let selected = self.selected_channel();
-            let visible_len = self.visible_channel_pane_entries().len();
-            if selected >= self.channel_scroll && selected < self.channel_scroll + visible_len {
-                Some(selected - self.channel_scroll)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
     }
 
     pub fn set_channel_view_height(&mut self, height: usize) {
@@ -982,6 +1069,7 @@ impl DashboardState {
             Some(ChannelPaneEntry::Channel { state, .. }) => {
                 self.activate_channel_command(state.id)
             }
+            Some(ChannelPaneEntry::VoiceParticipant { .. }) => None,
             None => None,
         }
     }
@@ -1125,7 +1213,11 @@ impl DashboardState {
         self.try_apply_unread_anchor_scroll();
 
         self.clamp_message_viewport();
-        self.queue_channel_ack(channel_id);
+        if is_forum {
+            self.queue_forum_acks(channel_id);
+        } else {
+            self.queue_channel_ack(channel_id);
+        }
 
         self.refresh_composer_emoji_candidates_for_current_query();
     }
@@ -1136,12 +1228,42 @@ impl DashboardState {
     /// "Mark as read" because activation already runs `queue_channel_ack` on its
     /// own.
     pub fn mark_channel_as_read(&mut self, channel_id: Id<ChannelMarker>) {
-        self.queue_channel_ack(channel_id);
+        if self
+            .discord
+            .channel(channel_id)
+            .is_some_and(|channel| channel.is_forum())
+        {
+            self.queue_forum_acks(channel_id);
+        } else {
+            self.queue_channel_ack(channel_id);
+        }
         if self.active_channel_id == Some(channel_id) {
             self.unread_divider_last_acked_id = None;
             self.pending_unread_anchor_scroll = false;
             self.clear_new_messages_marker();
         }
+    }
+
+    fn queue_forum_acks(&mut self, forum_id: Id<ChannelMarker>) {
+        let mut targets = Vec::new();
+        if let Some(message_id) = self.discord.channel_ack_target(forum_id) {
+            targets.push((forum_id, message_id));
+        }
+        targets.extend(self.discord.forum_child_ack_targets(forum_id));
+        if targets.is_empty() {
+            return;
+        }
+
+        for (channel_id, message_id) in targets.iter().copied() {
+            self.pending_read_acks.remove(&channel_id);
+            self.discord.apply_event(&AppEvent::MessageAck {
+                channel_id,
+                message_id,
+                mention_count: 0,
+            });
+        }
+        self.pending_commands
+            .push_back(AppCommand::AckChannels { targets });
     }
 
     /// Optimistic local ack + queued REST POST so the unread badge clears
@@ -1196,6 +1318,18 @@ impl DashboardState {
                     ChannelPaneEntry::CategoryHeader { state, .. } => Some(state.id),
                     _ => None,
                 }),
+            Some(ChannelPaneEntry::VoiceParticipant { parent_branch, .. })
+                if parent_branch.is_category_child() =>
+            {
+                entries
+                    .get(..selected)?
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        ChannelPaneEntry::CategoryHeader { state, .. } => Some(state.id),
+                        _ => None,
+                    })
+            }
             _ => None,
         }
     }
@@ -1204,8 +1338,52 @@ impl DashboardState {
         match self.channel_pane_entries().get(self.selected_channel()) {
             Some(ChannelPaneEntry::CategoryHeader { state, .. }) => Some(state.id),
             Some(ChannelPaneEntry::Channel { state, .. }) => Some(state.id),
+            Some(ChannelPaneEntry::VoiceParticipant { .. }) => None,
             None => None,
         }
+    }
+}
+
+fn selectable_channel_index_near(
+    entries: &[ChannelPaneEntry<'_>],
+    index: usize,
+    prefer_forward: bool,
+) -> Option<usize> {
+    if entries.is_empty() {
+        return None;
+    }
+    let index = index.min(entries.len() - 1);
+    if entries[index].is_selectable() {
+        return Some(index);
+    }
+    if prefer_forward {
+        entries
+            .iter()
+            .enumerate()
+            .skip(index.saturating_add(1))
+            .find_map(|(index, entry)| entry.is_selectable().then_some(index))
+            .or_else(|| {
+                entries
+                    .iter()
+                    .enumerate()
+                    .take(index)
+                    .rev()
+                    .find_map(|(index, entry)| entry.is_selectable().then_some(index))
+            })
+    } else {
+        entries
+            .iter()
+            .enumerate()
+            .take(index)
+            .rev()
+            .find_map(|(index, entry)| entry.is_selectable().then_some(index))
+            .or_else(|| {
+                entries
+                    .iter()
+                    .enumerate()
+                    .skip(index.saturating_add(1))
+                    .find_map(|(index, entry)| entry.is_selectable().then_some(index))
+            })
     }
 }
 
