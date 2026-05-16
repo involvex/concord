@@ -61,6 +61,7 @@ cargo fmt               # format in-place
 ```
 
 Bun wrapper (runs the built binary):
+
 ```pwsh
 bun install             # installs dependencies
 bun run concord         # runs the concord binary (builds if needed)
@@ -69,6 +70,7 @@ bun run concord         # runs the concord binary (builds if needed)
 CI additionally runs `cargo dist plan` to catch broken release config.
 
 ### CI check order
+
 ```
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
@@ -145,12 +147,14 @@ command as an independent task (slow REST calls do not block the UI queue).
 ## 6 · Build / config / runtime quirks
 
 ### Image prototype detection
+
 `src/tui/media/protocol.rs:query_image_picker` calls
 `ratatui_image::picker::Picker::from_query_stdio()` once at startup.
 Graceful fallback order: **Kitty Graphics → iTerm2 → Sixel → Halfblocks**.
 Silently degrades so the app stays usable on any terminal.
 
 ### File paths (src/paths.rs)
+
 | env | path |
 |---|---|
 | `XDG_CONFIG_HOME/concord/config.toml` | config (ignores relative `XDG_CONFIG_HOME`) |
@@ -159,6 +163,7 @@ Silently degrades so the app stays usable on any terminal.
 | `dirs::download_dir() \| ~/Downloads` | attachment downloads |
 
 ### Logging
+
 | env var | effect |
 |---|---|
 | `CONCORD_DEBUG=1` | `DEBUG` + `TIMING` lines written to log file |
@@ -169,18 +174,22 @@ Error logging: `logging::error("target", format!(…))`.  All targets are
 module names: `"history"`, `"preview"`, `"app"`, `"tui"`, `"config"`.
 
 ### Version check (src/version_check.rs)
+
 Polls `https://index.crates.io/co/nc/concord` — the crates.io sparse index.
 `ComparableVersion` is hand-rolled (no `semver` dep).  Ignores yanked and
 pre-release unless the current version itself is pre-release.
 
 ### Open URL
+
 Windows: `cmd /C start "" <url>`; macOS: `open <url>`; Linux: `xdg-open <url>`.
 
 ### Token storage
+
 Plaintext, no keychain.  Unix: `0600` file, `0700` parent dir.
 If credential store fails, the user is prompted to re-enter the token each session.
 
 ### ATTACHMENT upload limits (app.rs constants)
+
 | constant | value |
 |---|---|
 | `MAX_ATTACHMENT_PREVIEW_BYTES` | 8 MiB per HTTP fetch |
@@ -205,6 +214,7 @@ Redraw debounce (runtime.rs): `BACKGROUND_REDRAW_DEBOUNCE = 80 ms`.
 ---
 
 ## 8 · Environment variables for release
+
 | Variable | Purpose |
 |---|---|
 | `CARGO_REGISTRY_TOKEN` | `cargo publish --locked` |

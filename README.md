@@ -10,50 +10,19 @@ Concord is a feature-rich TUI (terminal user interface) client for Discord, writ
 ### Homebrew
 
 ```sh
-brew install chojs23/tap/concord
+brew install involvex/tap/concord
 ```
 
-### Cargo
+### Cargo / npm
 
 ```sh
-cargo install concord
+npm i -g @involvex/concord
 ```
 
 To install the latest unreleased version directly from the Git repository:
 
 ```sh
-cargo install --git https://github.com/chojs23/concord
-```
-
-### Nix
-
-Run without installing (requires flakes enabled):
-
-```sh
-nix run github:chojs23/concord
-```
-
-Install into your profile:
-
-```sh
-nix profile install github:chojs23/concord
-```
-
-Or add the flake as an input in your own `flake.nix`:
-
-```nix
-{
-  inputs.concord.url = "github:chojs23/concord";
-}
-```
-
-Then reference it as `concord.packages.${system}.default` in your configuration.
-
-A development shell with the pinned Rust toolchain and `rust-analyzer` is also
-available:
-
-```sh
-nix develop github:chojs23/concord
+cargo install --git https://github.com/involvex/concord
 ```
 
 ### GitHub Release installer
@@ -61,7 +30,7 @@ nix develop github:chojs23/concord
 Install the latest release with the cargo-dist shell installer:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/chojs23/concord/releases/latest/download/concord-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/involvex/concord/releases/latest/download/concord-installer.sh | sh
 ```
 
 The installer places `concord` under `$CARGO_HOME/bin`, which is usually
@@ -73,7 +42,7 @@ The installer places `concord` under `$CARGO_HOME/bin`, which is usually
 You need the Rust stable toolchain and Cargo.
 
 ```sh
-git clone https://github.com/chojs23/concord.git
+git clone https://github.com/involvex/concord.git
 cd concord
 cargo build --release
 ```
