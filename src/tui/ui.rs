@@ -74,7 +74,7 @@ use self::panes::{
 use self::panes::{render_channels, render_guilds, render_header, render_members};
 use self::popups::{
     render_channel_switcher_popup, render_debug_log_popup, render_emoji_reaction_picker,
-    render_image_viewer, render_leader_popup, render_message_action_menu,
+    render_help_popup, render_image_viewer, render_leader_popup, render_message_action_menu,
     render_message_delete_confirmation, render_message_pin_confirmation, render_options_popup,
     render_poll_vote_picker, render_reaction_users_popup, render_toast, render_user_profile_popup,
     user_profile_popup_has_avatar, user_profile_popup_text_geometry,
@@ -223,6 +223,7 @@ pub fn render(
     render_reaction_users_popup(frame, areas.messages, state);
     render_image_viewer(frame, areas.messages, state, viewer_image_preview);
     render_debug_log_popup(frame, areas.messages, state);
+    render_help_popup(frame, areas.messages, state);
     render_toast(frame, frame.area(), state);
 }
 

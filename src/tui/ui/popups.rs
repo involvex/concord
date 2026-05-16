@@ -8,6 +8,7 @@ mod action_menu;
 mod channel_switcher;
 mod confirmation;
 mod debug_log;
+mod help;
 mod image_viewer;
 mod options;
 mod polls;
@@ -31,6 +32,7 @@ pub(super) use confirmation::{
 #[cfg(test)]
 pub(super) use debug_log::debug_log_popup_lines;
 pub(super) use debug_log::render_debug_log_popup;
+pub(super) use help::render_help_popup;
 #[cfg(test)]
 pub(super) use image_viewer::centered_viewer_preview_area;
 pub(super) use image_viewer::render_image_viewer;

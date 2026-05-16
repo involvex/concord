@@ -20,6 +20,18 @@ impl DashboardState {
         self.debug_log_popup_open = false;
     }
 
+    pub fn is_help_popup_open(&self) -> bool {
+        self.help_popup_open
+    }
+
+    pub fn open_help_popup(&mut self) {
+        self.help_popup_open = true;
+    }
+
+    pub fn close_help_popup(&mut self) {
+        self.help_popup_open = false;
+    }
+
     pub fn request_open_composer_in_editor(&mut self) {
         self.open_composer_in_editor_requested = true;
     }

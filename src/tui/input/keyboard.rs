@@ -27,6 +27,7 @@ enum ScrollAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GlobalAction {
     ToggleDebugLog,
+    ToggleHelp,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,11 +243,21 @@ pub fn handle_key(state: &mut DashboardState, key: KeyEvent) -> Option<AppComman
         return handle_composer_key(state, key);
     }
 
-    // The debug log is intentionally available from regular dashboard modes,
-    // but popups and the composer get first chance to handle their own keys.
-    if matches!(global_action(key), Some(GlobalAction::ToggleDebugLog)) {
-        state.toggle_debug_log_popup();
-        return None;
+    // The debug log and help popup are intentionally available from regular
+    // dashboard modes, but popups and the composer get first chance to handle
+    // their own keys.
+    match global_action(key) {
+        Some(GlobalAction::ToggleDebugLog) => {
+            state.toggle_debug_log_popup();
+        }
+        Some(GlobalAction::ToggleHelp) => {
+            if state.is_help_popup_open() {
+                state.close_help_popup();
+            } else {
+                state.open_help_popup();
+            }
+        }
+        None => {}
     }
 
     if state.is_poll_vote_picker_open() {
@@ -1020,6 +1031,7 @@ fn message_shortcut_action(key: KeyEvent) -> Option<MessageShortcutAction> {
 fn global_action(key: KeyEvent) -> Option<GlobalAction> {
     match key.code {
         KeyCode::Char('`') => Some(GlobalAction::ToggleDebugLog),
+        KeyCode::Char('?') if is_shortcut_key(key) => Some(GlobalAction::ToggleHelp),
         _ => None,
     }
 }
